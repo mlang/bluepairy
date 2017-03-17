@@ -14,6 +14,15 @@
 
 #include <dbus/dbus.h>
 
+namespace bluez {
+  struct error: std::runtime_error {
+    error(char const *message) : std::runtime_error{message} {}
+  };
+  struct connection_attempt_failed: error {
+    connection_attempt_failed(char const *message) : error{message} {}
+  };
+}
+
 namespace {
 
 char const * const HIDP = "00000011-0000-1000-8000-00805f9b34fb";
@@ -187,6 +196,7 @@ int main(int argc, char *argv[]) {
   }
 
   init_bus();
+  read_messages();
   get_bluez_objects();
   register_agent();
 
@@ -224,9 +234,6 @@ int main(int argc, char *argv[]) {
     if (dev != devices.end()) {
       std::cout << "Trying to pair with " << (*dev)->name() << "." << std::endl;
       (*dev)->pair();
-      while (true) {
-	read_messages();
-      }
     }
   }
   while (state != ready) {
@@ -624,30 +631,12 @@ void Device::pair() const {
 				 DEVICE_INTERFACE, "Pair");
 
   if (msg) {
-    DBusPendingCall *pending;
-
-    if (dbus_connection_send_with_reply(systemBus, msg, &pending, -1)) {
-      if (pending) {
-	dbus_connection_flush(systemBus);
-	dbus_message_unref(msg);
-	dbus_pending_call_block(pending);
-	msg = dbus_pending_call_steal_reply(pending);
-	if (msg) {
-	  DBusError error;
-	  dbus_error_init(&error);
-	  dbus_set_error_from_message(&error, msg);
-	  dbus_message_unref(msg);
-	  if (dbus_error_is_set(&error)) {
-	    std::runtime_error e(error.message);
-	    dbus_error_free(&error);
-	    throw e;
-	  }
-	} else {
-	  fprintf(stderr, "reply message is NULL.\n");
-	}
-	dbus_pending_call_unref(pending);
-      } else {
-	fprintf(stderr, "pending == NULL\n");
+    dbus_uint32_t serial = 1;
+    if (dbus_connection_send(systemBus, msg, &serial)) {
+      dbus_connection_flush(systemBus);
+      dbus_message_unref(msg);
+      while (true) {
+	read_messages();
       }
     } else {
       fprintf(stderr, "Failed to send message.\n");
@@ -822,12 +811,36 @@ void register_agent() {
 void read_messages() {
   DBusMessage *incoming;
 
-  dbus_connection_read_write(systemBus, 1000);
+  dbus_connection_read_write(systemBus, 100);
 
   while ((incoming = dbus_connection_pop_message(systemBus))) {
     char const *path = dbus_message_get_path(incoming);
 
     switch (dbus_message_get_type(incoming)) {
+    case DBUS_MESSAGE_TYPE_ERROR: {
+      DBusError error;
+      dbus_error_init(&error);
+      if (dbus_set_error_from_message(&error, incoming)) {
+	if (strcmp("org.bluez.Error.ConnectionAttemptFailed", error.name) == 0) {
+	  bluez::connection_attempt_failed e(error.message);
+	  dbus_error_free(&error);
+	  dbus_message_unref(incoming);
+	  throw e;
+	} else {
+	  std::runtime_error e(std::string{error.name} + ": " + error.message);
+	  dbus_error_free(&error);
+	  dbus_message_unref(incoming);
+	  throw e;
+	}
+      }
+      break;
+    }
+    case DBUS_MESSAGE_TYPE_METHOD_CALL:
+      std::cerr << "Method call" << std::endl;
+      break;
+    case DBUS_MESSAGE_TYPE_METHOD_RETURN:
+      std::cout << "Method return" << std::endl;
+      break;
     case DBUS_MESSAGE_TYPE_SIGNAL:
       if (dbus_message_has_interface(incoming,
 				     "org.freedesktop.DBus.Properties") &&
@@ -864,8 +877,6 @@ void read_messages() {
       }
       fprintf(stderr, "Signal %s.%s\n", dbus_message_get_interface(incoming), dbus_message_get_member(incoming));
       break;
-    default:
-      fprintf(stderr, "Unknown incoming message type.\n");
     }
     dbus_message_unref(incoming);
   }
