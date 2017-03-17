@@ -1,0 +1,13 @@
+cmake_minimum_required(VERSION 3.2.0)
+project(bluepairy VERSION 0.0.1 LANGUAGES CXX)
+
+set(CMAKE_BUILD_TYPE MINSIZEREL)
+
+find_package(Boost QUIET REQUIRED program_options)
+find_package(PkgConfig QUIET REQUIRED)
+pkg_check_modules(DBus QUIET REQUIRED dbus-1)
+
+add_executable(bluepairy bluepairy.cxx)
+target_compile_options(bluepairy PRIVATE -fwhole-program)
+target_include_directories(bluepairy PRIVATE ${DBus_INCLUDE_DIRS})
+target_link_libraries(bluepairy ${DBus_LIBRARIES} Boost::program_options)
