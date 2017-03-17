@@ -699,6 +699,59 @@ DBusMessage *get_managed_objects(char const *path, char const *interface) {
   return msg;
 }
 
+void update_object(DBusMessageIter *object) {
+  if (DBUS_TYPE_OBJECT_PATH == dbus_message_iter_get_arg_type(object)) {
+    char const *path;
+
+    dbus_message_iter_get_basic(object, &path);
+    dbus_message_iter_next(object);
+    if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(object)) {
+      DBusMessageIter interfaces;
+
+      dbus_message_iter_recurse(object, &interfaces);
+      while (DBUS_TYPE_DICT_ENTRY ==
+	     dbus_message_iter_get_arg_type(&interfaces)) {
+	DBusMessageIter interface;
+
+	dbus_message_iter_recurse(&interfaces, &interface);
+	if (DBUS_TYPE_STRING ==
+	    dbus_message_iter_get_arg_type(&interface)) {
+	  char const *interfaceName;
+
+	  dbus_message_iter_get_basic(&interface, &interfaceName);
+	  if (strcmp(ADAPTER_INTERFACE, interfaceName) == 0) {
+	    auto adapter = get_adapter(path);
+
+	    dbus_message_iter_next(&interface);
+	    if (DBUS_TYPE_ARRAY ==
+		dbus_message_iter_get_arg_type(&interface)) {
+	      DBusMessageIter properties;
+
+	      dbus_message_iter_recurse(&interface, &properties);
+	      adapter->on_properties_changed(&properties);
+
+	      assert(!dbus_message_iter_has_next(&interface));
+	    }
+	  } else if (strcmp(DEVICE_INTERFACE, interfaceName) == 0) {
+	    auto &device = get_device(path);
+
+	    dbus_message_iter_next(&interface);
+	    if (DBUS_TYPE_ARRAY ==
+		dbus_message_iter_get_arg_type(&interface)) {
+	      DBusMessageIter properties;
+	      dbus_message_iter_recurse(&interface, &properties);
+	      device.on_properties_changed(&properties);
+	      assert(!dbus_message_iter_has_next(&interface));
+	    }
+	  }
+	}
+	dbus_message_iter_next(&interfaces);
+      }
+      assert(!dbus_message_iter_has_next(object));
+    }
+  }
+}
+
 void get_bluez_objects() {
   DBusMessage *msg = get_managed_objects("/", "org.bluez");
   DBusMessageIter args;
@@ -719,56 +772,8 @@ void get_bluez_objects() {
       DBusMessageIter object;
 
       dbus_message_iter_recurse(&objects, &object);
-      if (DBUS_TYPE_OBJECT_PATH == dbus_message_iter_get_arg_type(&object)) {
-	char const *path;
+      update_object(&object);
 
-	dbus_message_iter_get_basic(&object, &path);
-	dbus_message_iter_next(&object);
-	if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&object)) {
-	  DBusMessageIter interfaces;
-
-	  dbus_message_iter_recurse(&object, &interfaces);
-	  while (DBUS_TYPE_DICT_ENTRY ==
-		 dbus_message_iter_get_arg_type(&interfaces)) {
-	    DBusMessageIter interface;
-
-	    dbus_message_iter_recurse(&interfaces, &interface);
-	    if (DBUS_TYPE_STRING ==
-		dbus_message_iter_get_arg_type(&interface)) {
-	      char const *interfaceName;
-
-	      dbus_message_iter_get_basic(&interface, &interfaceName);
-	      if (strcmp(ADAPTER_INTERFACE, interfaceName) == 0) {
-		auto adapter = get_adapter(path);
-
-		dbus_message_iter_next(&interface);
-		if (DBUS_TYPE_ARRAY ==
-		    dbus_message_iter_get_arg_type(&interface)) {
-		  DBusMessageIter properties;
-
-		  dbus_message_iter_recurse(&interface, &properties);
-		  adapter->on_properties_changed(&properties);
-
-		  assert(!dbus_message_iter_has_next(&interface));
-		}
-	      } else if (strcmp(DEVICE_INTERFACE, interfaceName) == 0) {
-		auto &device = get_device(path);
-
-		dbus_message_iter_next(&interface);
-		if (DBUS_TYPE_ARRAY ==
-		    dbus_message_iter_get_arg_type(&interface)) {
-		  DBusMessageIter properties;
-		  dbus_message_iter_recurse(&interface, &properties);
-		  device.on_properties_changed(&properties);
-		  assert(!dbus_message_iter_has_next(&interface));
-		}
-	      }
-	    }
-	    dbus_message_iter_next(&interfaces);
-	  }
-	  assert(!dbus_message_iter_has_next(&object));
-	}
-      }
       dbus_message_iter_next(&objects);
     }
     assert(!dbus_message_iter_has_next(&args));
@@ -820,6 +825,8 @@ void read_messages() {
     case DBUS_MESSAGE_TYPE_ERROR: {
       DBusError error;
       dbus_error_init(&error);
+      dbus_uint32_t reply_serial = dbus_message_get_reply_serial(incoming);
+      // According to tests, reply_serial is wrong, bluez bug?
       if (dbus_set_error_from_message(&error, incoming)) {
 	if (strcmp("org.bluez.Error.ConnectionAttemptFailed", error.name) == 0) {
 	  bluez::connection_attempt_failed e(error.message);
@@ -835,11 +842,13 @@ void read_messages() {
       }
       break;
     }
+    case DBUS_MESSAGE_TYPE_METHOD_RETURN: {
+      dbus_uint32_t reply_serial = dbus_message_get_reply_serial(incoming);
+      std::cout << "Method return " << reply_serial << std::endl;
+      break;
+    }
     case DBUS_MESSAGE_TYPE_METHOD_CALL:
       std::cerr << "Method call" << std::endl;
-      break;
-    case DBUS_MESSAGE_TYPE_METHOD_RETURN:
-      std::cout << "Method return" << std::endl;
       break;
     case DBUS_MESSAGE_TYPE_SIGNAL:
       if (dbus_message_has_interface(incoming,
@@ -872,6 +881,10 @@ void read_messages() {
 	}
       } else if (dbus_message_has_interface(incoming, "org.freedesktop.DBus.ObjectManager")) {
 	if (dbus_message_has_member(incoming, "InterfacesAdded")) {
+	  DBusMessageIter args;
+	  dbus_message_iter_init(incoming, &args);
+
+	  update_object(&args);
 	} else if (dbus_message_has_member(incoming, "InterfacesRemoved")) {
 	}
       }
