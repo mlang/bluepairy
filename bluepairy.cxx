@@ -1,898 +1,746 @@
-#include <algorithm>
-#include <cassert>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <iostream>
-#include <memory>
-#include <regex>
-#include <set>
-#include <string>
-#include <vector>
 
 #include <boost/program_options.hpp>
 
-#include <dbus/dbus.h>
+#include "bluepairy.hxx"
 
-namespace bluez {
-  struct error: std::runtime_error {
-    error(char const *message) : std::runtime_error{message} {}
-  };
-  struct connection_attempt_failed: error {
-    connection_attempt_failed(char const *message) : error{message} {}
-  };
-}
+int main(int argc, char *argv[])
+{
+  std::string FriendlyName;
+  std::vector<std::string> UUIDs;
 
-namespace {
+  using command_line_parser = boost::program_options::command_line_parser;
+  using invalid_command_line_syntax = boost::program_options::invalid_command_line_syntax;
+  using options_description = boost::program_options::options_description;
+  using positional_options_description = boost::program_options::positional_options_description;
+  using required_option = boost::program_options::required_option;
+  using unknown_option = boost::program_options::unknown_option;
+  using variables_map = boost::program_options::variables_map;
 
-char const * const HIDP = "00000011-0000-1000-8000-00805f9b34fb";
-char const * const SPP  = "00001101-0000-1000-8000-00805f9b34fb";
-
-DBusConnection *systemBus;
-
-class Object {
-  std::string const dbus_path;
-
-protected:
-  Object(std::string const &path) : dbus_path{path} {}
-
-public:
-  std::string const &path() const { return dbus_path; }
-};
-
-class Device;
-
-class Adapter : public Object {
-  std::string property_address;
-  bool property_powered;
-  bool property_discovering;
-
-public:
-  Adapter(std::string const &path) : Object{path} {};
-
-  void on_properties_changed(DBusMessageIter *);
-
-  std::string address() const { return property_address; }
-  bool powered() const { return property_powered; }
-  void powered(bool);
-  bool discovering() const { return property_discovering; }
-
-  void start_discovery() const;
-  void remove_device(Device const &) const;
-};
-
-class Device : public Object {
-  std::shared_ptr<Adapter> property_adapter;
-  std::string property_address;
-  std::string property_name;
-  bool property_paired;
-  bool property_connected;
-  std::set<std::string> property_uuids;
-
-public:
-  Device(std::string const &path) : Object{path} {};
-  void on_properties_changed(DBusMessageIter *);
-
-  std::string address() const { return property_address; }
-  std::shared_ptr<Adapter const> adapter() const { return property_adapter; }
-  std::string name() const { return property_name; }
-  bool paired() const { return property_paired; }
-  bool connected() const { return property_connected; }
-  std::set<std::string> const &uuids() const { return property_uuids; }
-
-  void pair() const;
-
-  void forget() const { adapter()->remove_device(*this); }
-};
-
-std::vector<std::shared_ptr<Adapter>> adapters;
-
-std::shared_ptr<Adapter> get_adapter(char const *path) {
-  auto pos = std::find_if(adapters.begin(), adapters.end(),
-		   [path](auto &adapter) {
-		     return adapter->path() == path;
-		   });
-  if (pos != adapters.end()) return *pos;
-
-  adapters.push_back(std::make_shared<Adapter>(path));
-  return adapters.back();
-}
-
-  std::vector<std::shared_ptr<Device>> devices;
-
-Device &get_device(char const *path) {
-  auto pos = std::find_if(devices.begin(), devices.end(),
-			  [path](auto const &device) {
-			    return device->path() == path;
-    		          });
-  if (pos != devices.end()) return **pos;
-
-  devices.push_back(std::make_shared<Device>(path));
-  return *devices.back();
-}
-
-enum State {
-  no_adapter = 0,
-  no_power,
-  wait_for_power_on,
-  search_friendly_name,
-  device_misses_profile,
-  device_not_paired,
-  device_not_connected,
-  start_discovery,
-  starting_discovery,
-  search_friendly_name_while_discovering,
-  ready
-} state = no_adapter;
-
-void init_bus();
-void get_bluez_objects();
-void register_agent();
-void read_messages();
-
-}
-
-int main(int argc, char *argv[]) {
-  std::string friendly_name;
-  std::vector<std::string> uuids;
-
-  using namespace boost::program_options;
-
-  options_description desc("Allowed options");
-  desc.add_options()
+  options_description Desc("Allowed options");
+  Desc.add_options()
   ("help,?", "print usage message")
-  ("friendly-name,n", value(&friendly_name)->required(),
+    ("friendly-name,n", boost::program_options::value(&FriendlyName)->required(),
    "Device name (regex)")
-  ("profile-uuid,u", value(&uuids), "UUID (regex)")
+    ("profile-uuid,u", boost::program_options::value(&UUIDs), "UUID (regex)")
   ("hidp", "Require HID profile to be present")
   ;
-  positional_options_description positional_desc;
-  positional_desc.add("friendly-name", 1);
-  variables_map vm;
+
+  positional_options_description PositionalDesc;
+  PositionalDesc.add("friendly-name", 1);
+  variables_map VariablesMap;
   try {
     store(command_line_parser(argc, argv)
-	  .options(desc)
-	  .positional(positional_desc)
-	  .run(), vm);
-    notify(vm);
-  } catch (unknown_option &e) {
-    std::cerr << e.what() << std::endl << std::endl << desc << std::endl;
+          .options(Desc)
+          .positional(PositionalDesc)
+          .run(), VariablesMap);
+    notify(VariablesMap);
+  } catch (unknown_option &E) {
+    std::cerr << E.what() << std::endl << std::endl << Desc << std::endl;
     return EXIT_FAILURE;
-  } catch (required_option &e) {
-    std::cerr << e.what() << std::endl << std::endl << desc << std::endl;
+  } catch (required_option &E) {
+    std::cerr << E.what() << std::endl << std::endl << Desc << std::endl;
     return EXIT_FAILURE;
-  } catch (invalid_command_line_syntax &e) {
-    std::cerr << e.what () << std::endl << desc << std::endl;
+  } catch (invalid_command_line_syntax &E) {
+    std::cerr << E.what () << std::endl << Desc << std::endl;
     return EXIT_FAILURE;
   }
 
-  if (vm.count("help")) {
-    std::cout << desc << std::endl;
+  if (VariablesMap.count("help") > 0) {
+    std::cout << Desc << std::endl;
     return EXIT_SUCCESS;
   }
 
-  if (friendly_name.empty()) {
+  if (FriendlyName.empty()) {
     std::cerr << "Empty friendly name is not allowed." << std::endl;
     return EXIT_FAILURE;
   }
 
-  for (auto &uuid: uuids) {
-    if (uuid.empty()) {
+  for (auto const &UUID: UUIDs) {
+    if (UUID.empty()) {
       std::cerr << "Empty UUIDs are not allowed." << std::endl;
       return EXIT_FAILURE;
     }
   }
 
-  if (vm.count("hidp")) {
-    uuids.push_back(HIDP);
+  if (VariablesMap.count("hidp") > 0) {
+    UUIDs.push_back("00000011-0000-1000-8000-00805f9b34fb");
   }
 
-  if (!uuids.empty()) {
-    std::sort(std::begin(uuids), std::end(uuids));
+  if (!UUIDs.empty()) {
     std::cout << "Bluetooth Profile UUIDs required to be offered by "
-	      << "the device:" << std::endl;
-    copy(uuids.begin(), uuids.end(),
-	 std::ostream_iterator<std::string>(std::cout, "\n"));
+              << "the device:" << std::endl;
+    copy(begin(UUIDs), end(UUIDs),
+         std::ostream_iterator<std::string>(std::cout, "\n"));
   }
 
-  init_bus();
-  read_messages();
-  get_bluez_objects();
-  register_agent();
+  Bluepairy Bluetooth(FriendlyName, UUIDs);
+  auto done = [&Bluetooth]() {
+    auto UsableDevices = Bluetooth.usableDevices();
 
-  {
-    std::regex pattern{friendly_name};
-    auto search_name = [&pattern](auto device) {
-      return regex_search(device->name(), pattern,
-			  std::regex_constants::match_not_null);
-    };
-    auto has_profiles = [&uuids](auto device) {
-      std::vector<std::string> intersection;
-      std::set_intersection(device->uuids().begin(), device->uuids().end(),
-			    uuids.begin(), uuids.end(),
-			    std::back_inserter(intersection));
-      return intersection == uuids;
-    };
-    auto usable = [search_name, has_profiles](auto device) {
-      return device->paired() && device->adapter()->powered() &&
-             search_name(device) && has_profiles(device);
-    };
-    auto dev = find_if(begin(devices), end(devices), usable);
-    if (dev != end(devices)) {
-      std::cout << "Apparently usable pairing with "
-		<< (*dev)->name() << " (" << (*dev)->address() << ") via "
-		<< (*dev)->adapter()->address() << " found, good luck!"
-		<< std::endl;
+    if (!UsableDevices.empty()) {
+      std::cout << "Found "
+                << (UsableDevices.size() == 1? "one matching device"
+                                             : "several usable matches")
+                << ":" << std::endl;
+      for (auto Device: UsableDevices) {
+        std::cout << Device->name() << " (" << Device->address()
+                  << ") paired via " << Device->adapter()->address()
+                  << std::endl;
+      }
 
-      return EXIT_SUCCESS;
+      return true;
     }
-    auto unpaired = [search_name, has_profiles](auto device) {
-      return device->adapter()->powered() && !device->paired() &&
-             search_name(device) && has_profiles(device);
-    };
-    dev = find_if(begin(devices), end(devices), unpaired);
-    if (dev != devices.end()) {
-      std::cout << "Trying to pair with " << (*dev)->name() << "." << std::endl;
-      (*dev)->pair();
-    }
+
+    return false;
+  };
+
+  if (done()) {
+    return EXIT_SUCCESS;
   }
-  while (state != ready) {
-    read_messages();
-
-    switch (state) {
-    case no_adapter: {
-      if (!adapters.empty()) {
-	bool power = false;
-	for (auto adapter: adapters) {
-	  if (adapter->powered()) power = true;
-	}
-
-	if (power) state = search_friendly_name;
-	else state = no_power;
-      }				      
-
-      if (state == no_adapter) {
-	std::cerr << "No adapter present." << std::endl;
-	return EXIT_FAILURE;
-      }
-
-      break;
-    }
-
-    case no_power: {
-      for (auto adapter: adapters) {
-	std::cerr << "Powering up controller " << adapter->address() << std::endl;
-	if (!adapter->powered()) {
-	  adapter->powered(true);
-	  state = wait_for_power_on;
-	}
-      }
-			      
-      if (state == no_power)
-	return EXIT_FAILURE;
-
-      break;
-    }
-
-    case wait_for_power_on:
-      for (int retries = 0; retries < 10; ++retries) {
-	read_messages();
-	bool power = false;
-	for (auto adapter: adapters) {
-	  if (adapter->powered()) power = true;
-	}
-	if (power) {
-	  state = search_friendly_name;
-	  break;
-	}
-      }
-
-      if (state == no_power) {
-	std::cerr << "Failed to power up controller." << std::endl;
-	return EXIT_FAILURE;
-      }
-
-      break;
-
-    case search_friendly_name: {
-      std::regex const pattern(friendly_name);
-      auto flags = std::regex_constants::match_not_null;
-      for (auto &device: devices) {
-	if (regex_search(device->name(), pattern, flags)) {
-	  std::cout << "Device " << device->name()
-		    << " (" << device->address() << ") "
-		    << "matches." << std::endl;
-	  if (device->paired()) {
-	    std::cout << "Device is paired." << std::endl;
-	    for (auto &uuid: uuids) {
-	      auto profiles = device->uuids();
-	      if (profiles.find(uuid) == profiles.end()) {
-		std::cerr << "Device " << device->name() << " does not offer " << uuid << std::endl;
-	      }
-	    }
-	    state = ready;
-	  }
-	}
-      }
-
-      if (state == search_friendly_name) {
-	std::cout << "Friendly name matching "
-		  << friendly_name
-		  << " not found."
-		  << std::endl;
-
-	state = start_discovery;
-      }
-
-      break;
-    }
-
-    case start_discovery: {
-      for (auto adapter: adapters) {
-	adapter->start_discovery();
-	state = starting_discovery;
-      }
-
-      if (state == start_discovery)
-	return EXIT_FAILURE;
-
-      break;
-    }
-
-    case starting_discovery: {
-      for (auto adapter: adapters) {
-	if (adapter->discovering()) {
-	  std::cout << "Adapter is discovering." << std::endl;
-	  state = search_friendly_name_while_discovering;
-	}
-      }
-      break;
-    }
-
-    case search_friendly_name_while_discovering: {
-      static int tries = 0;
-      std::cout << "Retry " << tries << std::endl;
-      tries++;
-
-      break;
-    }
-
-    default:
-      fprintf(stderr, "Unhandled state %d\n", state);
-      return EXIT_FAILURE;
-    }
-  }
-
-  dbus_connection_unref(systemBus);
-
-  return EXIT_SUCCESS;
 }
 
 namespace {
+  void throwIfErrorIsSet(DBusError &Error) {
+    if (dbus_error_is_set(&Error) == TRUE) {
+      if (strcmp("org.bluez.Error.AlreadyConnected", Error.name) == 0) {
+        BlueZ::AlreadyConnected E(Error.message);
+        dbus_error_free(&Error);
+        throw E;
+      } else if (strcmp("org.bluez.Error.AlreadyExists", Error.name) == 0) {
+        BlueZ::AlreadyExists E(Error.message);
+        dbus_error_free(&Error);
+        throw E;
+      } else if (strcmp("org.bluez.Error.AuthenticationRejected",
+                        Error.name) == 0) {
+        BlueZ::AuthenticationRejected E(Error.message);
+        dbus_error_free(&Error);
+        throw E;
+      } else if (strcmp("org.bluez.Error.ConnectionAttemptFailed",
+                        Error.name) == 0) {
+        BlueZ::ConnectionAttemptFailed E(Error.message);
+        dbus_error_free(&Error);
+        throw E;
+      }
 
-char const * const BLUEZ_SERVICE     = "org.bluez";
+      std::runtime_error E(std::string(Error.name) + ": " + Error.message);
+      dbus_error_free(&Error);
+      throw E;
+    }
+  }
+} // namespace
 
-char const * const ADAPTER_INTERFACE = "org.bluez.Adapter1";
-char const * const DEVICE_INTERFACE  = "org.bluez.Device1";
-char const * const ADAPTER           = "Adapter";
-char const * const ADDRESS           = "Address";
-char const * const CONNECTED         = "Connected";
-char const * const PAIRED            = "Paired";
-char const * const POWERED           = "Powered";
+namespace BlueZ {
+  constexpr char const * const Service = "org.bluez";
 
-void Adapter::on_properties_changed(DBusMessageIter *properties) {
-  while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(properties)) {
-    DBusMessageIter property;
-    dbus_message_iter_recurse(properties, &property);
+  struct Agent {
+    static constexpr char const * const Interface = "org.bluez.Agent1";
+  };
+
+  struct AgentManager final : public Object {
+    static constexpr char const * const Interface = "org.bluez.AgentManager1";
+
+    explicit AgentManager(::Bluepairy *Pairy) : Object("/org/bluez", Pairy) {}
+
+    void registerAgent(char const *AgentPath, char const *Capabilities) const {
+      DBusMessage *RegisterAgent = dbus_message_new_method_call
+        (Service, path().c_str(), Interface, "RegisterAgent");
+
+      if (RegisterAgent == nullptr) {
+        throw std::bad_alloc();
+      }
+
+      if (dbus_message_append_args
+          (RegisterAgent,
+           DBUS_TYPE_OBJECT_PATH, &AgentPath,
+           DBUS_TYPE_STRING, &Capabilities,
+           DBUS_TYPE_INVALID) == FALSE) {
+        throw std::runtime_error
+          ("Failed to append arguments to RegisterAgent message");
+      }
+
+      DBusError Error;
+      dbus_error_init(&Error);
+      DBusMessage *Reply = dbus_connection_send_with_reply_and_block
+        (Bluepairy->SystemBus, RegisterAgent, -1, &Error);
+      dbus_message_unref(RegisterAgent);
+      throwIfErrorIsSet(Error);
+      if (Reply == nullptr) {
+        throw std::bad_alloc();
+      }
+
+      dbus_set_error_from_message(&Error, Reply);
+      dbus_message_unref(Reply);
+      throwIfErrorIsSet(Error);
+    }
+  };
+
+  constexpr char const * const Adapter::Interface;
+  constexpr char const * const Adapter::Property::Address;
+  constexpr char const * const Adapter::Property::Discovering;
+  constexpr char const * const Adapter::Property::Powered;
+  constexpr char const * const Agent::Interface;
+  constexpr char const * const AgentManager::Interface;
+  constexpr char const * const Device::Interface;
+  constexpr char const * const Device::Property::Adapter;
+  constexpr char const * const Device::Property::Address;
+  constexpr char const * const Device::Property::Connected;
+  constexpr char const * const Device::Property::Name;
+  constexpr char const * const Device::Property::Paired;
+} // namespace BlueZ
+
+namespace DBus {
+  namespace interface {
+    constexpr char const * const ObjectManager =
+      "org.freedesktop.DBus.ObjectManager";
+    constexpr char const * const Properties =
+      "org.freedesktop.DBus.Properties";
+  }
+} // namespace DBus
+
+constexpr char const * const Bluepairy::AgentPath;
+
+Bluepairy::Bluepairy
+( std::string const &Pattern, std::vector<std::string> const &UUIDs )
+: Pattern(Pattern)
+, ExpectedUUIDs(UUIDs)
+, SystemBus([]() {
+    DBusError Error;
+    dbus_error_init(&Error);
+
+    auto Bus = dbus_bus_get(DBUS_BUS_SYSTEM, &Error);
+    throwIfErrorIsSet(Error);
+
+    if (Bus == nullptr) {
+      throw std::bad_alloc();
+    }
+
+    return Bus;
+  }())
+{
+  sort(begin(ExpectedUUIDs), end(ExpectedUUIDs));
+
+  DBusError Error;
+
+  dbus_error_init(&Error);
+  dbus_bus_add_match(SystemBus, "type='signal',sender='org.bluez'", &Error);
+  throwIfErrorIsSet(Error);
+
+  { // Get managed objects
+    DBusMessage *GetManagedObjects = dbus_message_new_method_call
+      (BlueZ::Service, "/", DBus::interface::ObjectManager, "GetManagedObjects");
+    if (!GetManagedObjects) throw std::bad_alloc();
+
+    DBusMessage *ManagedObjects = dbus_connection_send_with_reply_and_block
+      (SystemBus, GetManagedObjects, -1, &Error);
+    dbus_message_unref(GetManagedObjects);
+    throwIfErrorIsSet(Error);
+    if (!ManagedObjects) throw std::bad_alloc();
+    dbus_set_error_from_message(&Error, ManagedObjects);
+    throwIfErrorIsSet(Error);
+
+    DBusMessageIter Args;
+    if (!dbus_message_iter_init(ManagedObjects, &Args)) {
+      throw std::runtime_error("GetManagedObjects reply was empty");
+    }
+
+    if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&Args)) {
+      DBusMessageIter Objects;
+
+      dbus_message_iter_recurse(&Args, &Objects);
+      while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(&Objects)) {
+        DBusMessageIter Object;
+        
+        dbus_message_iter_recurse(&Objects, &Object);
+        updateObjectProperties(&Object);
+
+        dbus_message_iter_next(&Objects);
+      }
+      assert(dbus_message_iter_has_next(&Args) == FALSE);
+    }
+    dbus_message_unref(ManagedObjects);
+  }
+
+  auto AgentManager = BlueZ::AgentManager(this);
+  AgentManager.registerAgent(AgentPath, "DisplayYesNo");
+}
+
+void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}... */)
+{
+  while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(Properties)) {
+    DBusMessageIter Property;
+    dbus_message_iter_recurse(Properties, &Property);
     if (DBUS_TYPE_STRING ==
-	dbus_message_iter_get_arg_type(&property)) {
-      char const *propertyName;
-      dbus_message_iter_get_basic(&property,
-				  &propertyName);
-      dbus_message_iter_next(&property);
-      if (DBUS_TYPE_VARIANT == dbus_message_iter_get_arg_type(&property)) {
-	DBusMessageIter value;
-	dbus_message_iter_recurse(&property, &value);
-	if (strcmp(POWERED, propertyName) == 0) {
-	  if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&value)) {
-	    dbus_bool_t boolValue;
-	    dbus_message_iter_get_basic(&value, &boolValue);
-	    property_powered = boolValue == TRUE;
-	  }
-	} else if (strcmp(ADDRESS, propertyName) == 0) {
-	  if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&value)) {
-	    char const *stringValue;
-	    dbus_message_iter_get_basic(&value, &stringValue);
-	    property_address = stringValue;
-	  }
-	}
-	assert(!dbus_message_iter_has_next(&property));
+        dbus_message_iter_get_arg_type(&Property)) {
+      char const *PropertyName;
+      dbus_message_iter_get_basic(&Property, &PropertyName);
+      dbus_message_iter_next(&Property);
+      if (DBUS_TYPE_VARIANT == dbus_message_iter_get_arg_type(&Property)) {
+        DBusMessageIter Value;
+        dbus_message_iter_recurse(&Property, &Value);
+        if (strcmp(Property::Powered, PropertyName) == 0) {
+          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
+            dbus_bool_t BoolValue;
+            dbus_message_iter_get_basic(&Value, &BoolValue);
+            Powered = BoolValue == TRUE;
+          }
+        } else if (strcmp(Property::Discovering, PropertyName) == 0) {
+          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
+            dbus_bool_t BoolValue;
+            dbus_message_iter_get_basic(&Value, &BoolValue);
+            Discovering = BoolValue == TRUE;
+          }
+        } else if (strcmp(Property::Address, PropertyName) == 0) {
+          if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Value)) {
+            char const *StringValue;
+            dbus_message_iter_get_basic(&Value, &StringValue);
+            Address = StringValue;
+          }
+        }
+        assert(!dbus_message_iter_has_next(&Property));
       }
     }
-    dbus_message_iter_next(properties);
+    dbus_message_iter_next(Properties);
   }
 }
 
-void Adapter::powered(bool value) {
-  DBusMessage *msg =
-    dbus_message_new_method_call(BLUEZ_SERVICE, path().c_str(),
-				 "org.freedesktop.DBus.Properties", "Set");
+void BlueZ::Adapter::isPowered(bool Value)
+{
+  DBusMessage *Set = dbus_message_new_method_call
+    (Service, path().c_str(), DBus::interface::Properties, "Set");
+  if (!Set) throw std::bad_alloc();
 
-  if (msg) {
-    DBusPendingCall *pending;
-    DBusMessageIter args;
+  {
+    DBusMessageIter Args;
 
-    dbus_message_iter_init_append(msg, &args);
+    dbus_message_iter_init_append(Set, &Args);
+    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Interface);
+    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Property::Powered);
 
-    dbus_message_iter_append_basic(&args,
-				   DBUS_TYPE_STRING, &ADAPTER_INTERFACE);
-    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &POWERED);
-    {
-      DBusMessageIter variant;
-      dbus_bool_t boolValue = value? TRUE : FALSE;
-      dbus_message_iter_open_container(&args,
-				       DBUS_TYPE_VARIANT, "b", &variant);
-      dbus_message_iter_append_basic(&variant, DBUS_TYPE_BOOLEAN, &boolValue);
-      dbus_message_iter_close_container(&args, &variant);
-    }
+    DBusMessageIter Variant;
+    dbus_bool_t BoolValue = Value? TRUE : FALSE;
+    dbus_message_iter_open_container(&Args, DBUS_TYPE_VARIANT, "b", &Variant);
+    dbus_message_iter_append_basic(&Variant, DBUS_TYPE_BOOLEAN, &BoolValue);
+    dbus_message_iter_close_container(&Args, &Variant);
+  }
 
-    if (dbus_connection_send_with_reply(systemBus, msg, &pending, -1)) {
-      if (pending) {
-	dbus_connection_flush(systemBus);
-	dbus_message_unref(msg);
-	dbus_pending_call_block(pending);
-	msg = dbus_pending_call_steal_reply(pending);
-	if (msg) {
-	  DBusError error;
-	  dbus_error_init(&error);
-	  dbus_set_error_from_message(&error, msg);
-	  if (dbus_error_is_set(&error)) {
-	    std::runtime_error e(error.message);
-	    dbus_error_free(&error);
-	    throw e;
-	  }
-	  dbus_message_unref(msg);
-	} else {
-	  fprintf(stderr, "reply message is NULL.\n");
-	}
-	dbus_pending_call_unref(pending);
-      } else {
-	fprintf(stderr, "pending == NULL\n");
+  DBusError Error;
+  dbus_error_init(&Error);
+  DBusMessage *Reply = dbus_connection_send_with_reply_and_block
+    (Bluepairy->SystemBus, Set, -1, &Error);
+  dbus_message_unref(Set);
+  throwIfErrorIsSet(Error);
+  if (!Reply) throw std::bad_alloc();
+  dbus_set_error_from_message(&Error, Reply);
+  throwIfErrorIsSet(Error);
+  dbus_message_unref(Reply);
+}
+
+void BlueZ::Adapter::startDiscovery() const
+{
+  DBusMessage *StartDiscovery = dbus_message_new_method_call
+    (Service, path().c_str(), Interface, "StartDiscovery");
+  if (!StartDiscovery) throw std::bad_alloc();
+
+  DBusError Error;
+  dbus_error_init(&Error);
+  DBusMessage *Reply = dbus_connection_send_with_reply_and_block
+    (Bluepairy->SystemBus, StartDiscovery, -1, &Error);
+  dbus_message_unref(StartDiscovery);
+  throwIfErrorIsSet(Error);
+  if (!Reply) throw std::bad_alloc();
+  dbus_set_error_from_message(&Error, Reply);
+  dbus_message_unref(Reply);
+  throwIfErrorIsSet(Error);
+}
+
+void BlueZ::Adapter::removeDevice(BlueZ::Device const *Device) const
+{
+  DBusMessage *RemoveDevice = dbus_message_new_method_call
+    (Service, path().c_str(), Interface, "RemoveDevice");
+  if (!RemoveDevice) throw std::bad_alloc();
+
+  DBusMessageIter Args;
+  dbus_message_iter_init_append(RemoveDevice, &Args);
+  dbus_message_iter_append_basic(&Args, DBUS_TYPE_OBJECT_PATH, Device->path().c_str());
+
+  DBusError Error;
+  dbus_error_init(&Error);
+  DBusMessage *Reply = dbus_connection_send_with_reply_and_block
+    (Bluepairy->SystemBus, RemoveDevice, -1, &Error);
+  dbus_message_unref(RemoveDevice);
+  throwIfErrorIsSet(Error);
+  dbus_set_error_from_message(&Error, Reply);
+  dbus_message_unref(Reply);
+  throwIfErrorIsSet(Error);
+}
+
+void BlueZ::Device::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}... */)
+{
+  while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(Properties)) {
+    DBusMessageIter Property;
+    dbus_message_iter_recurse(Properties, &Property);
+    if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Property)) {
+      char const *PropertyName;
+      dbus_message_iter_get_basic(&Property, &PropertyName);
+      dbus_message_iter_next(&Property);
+      if (DBUS_TYPE_VARIANT == dbus_message_iter_get_arg_type(&Property)) {
+        DBusMessageIter Value;
+        dbus_message_iter_recurse(&Property, &Value);
+        if (strcmp(Property::Name, PropertyName) == 0) {
+          if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Value)) {
+            char const *StringValue;
+            dbus_message_iter_get_basic(&Value, &StringValue);
+            Name = StringValue;
+          }
+        } else if (strcmp(Property::Address, PropertyName) == 0) {
+          if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Value)) {
+            char const *StringValue;
+            dbus_message_iter_get_basic(&Value, &StringValue);
+            Address = StringValue;
+          }
+        } else if (strcmp(Property::Paired, PropertyName) == 0) {
+          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
+            dbus_bool_t BoolValue;
+            dbus_message_iter_get_basic(&Value, &BoolValue);
+            Paired = BoolValue == TRUE;
+          }
+        } else if (strcmp(Property::Connected, PropertyName) == 0) {
+          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
+            dbus_bool_t BoolValue;
+            dbus_message_iter_get_basic(&Value, &BoolValue);
+            Connected = BoolValue == TRUE;
+          }
+        } else if (strcmp("UUIDs", PropertyName) == 0) {
+          if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&Value)) {
+            DBusMessageIter UUIDs;
+
+            dbus_message_iter_recurse(&Value, &UUIDs);
+
+            this->UUIDs.clear();
+            while (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&UUIDs)) {
+              char const *UUID;
+              dbus_message_iter_get_basic(&UUIDs, &UUID);
+
+              this->UUIDs.insert(UUID);
+              dbus_message_iter_next(&UUIDs);
+            }
+          }
+        } else if (strcmp(Property::Adapter, PropertyName) == 0) {
+          if (DBUS_TYPE_OBJECT_PATH == dbus_message_iter_get_arg_type(&Value)) {
+            char const *ObjectPath;
+            dbus_message_iter_get_basic(&Value, &ObjectPath);
+            if (ObjectPath) {
+              AdapterPtr = Bluepairy->getAdapter(ObjectPath);
+            } else {
+              AdapterPtr.reset();
+            }
+          }
+        }
+        assert(!dbus_message_iter_has_next(&Property));
       }
-    } else {
-      fprintf(stderr, "Failed to send message.\n");
+    }
+    dbus_message_iter_next(Properties);
+  }
+}
+
+void BlueZ::Device::pair() const
+{
+  DBusMessage *Pair = dbus_message_new_method_call
+    (Service, path().c_str(), Interface, "Pair");
+  if (!Pair) throw std::bad_alloc();
+
+  dbus_uint32_t Serial;
+  if (dbus_connection_send(Bluepairy->SystemBus, Pair, &Serial)) {
+    std::cout << "Outgoing serial " << Serial << std::endl;
+    dbus_message_unref(Pair);
+    while (true) {
+      Bluepairy->readWrite();
     }
   } else {
-    fprintf(stderr, "Failed to allocate method call message.\n");
+    throw std::runtime_error("Failed to send message");
   }
 }
 
-void Adapter::start_discovery() const {
-  DBusMessage *msg =
-    dbus_message_new_method_call(BLUEZ_SERVICE, path().c_str(),
-				 ADAPTER_INTERFACE, "StartDiscovery");
+void BlueZ::Device::connectProfile(std::string UUID) const {
+  DBusMessage *ConnectProfile = dbus_message_new_method_call
+    (Service, path().c_str(), Interface, "ConnectProfile");
 
-  if (msg) {
-    DBusPendingCall *pending;
-
-    if (dbus_connection_send_with_reply(systemBus, msg, &pending, -1)) {
-      if (pending) {
-	dbus_connection_flush(systemBus);
-	dbus_message_unref(msg);
-	dbus_pending_call_block(pending);
-	msg = dbus_pending_call_steal_reply(pending);
-	if (msg) {
-	  DBusError error;
-	  dbus_error_init(&error);
-	  dbus_set_error_from_message(&error, msg);
-	  dbus_message_unref(msg);
-	  if (dbus_error_is_set(&error)) {
-	    std::runtime_error e(error.message);
-	    dbus_error_free(&error);
-	    throw e;
-	  }
-	} else {
-	  fprintf(stderr, "reply message is NULL.\n");
-	}
-	dbus_pending_call_unref(pending);
-      } else {
-	fprintf(stderr, "pending == NULL\n");
-      }
-    } else {
-      fprintf(stderr, "Failed to send message.\n");
-    }
-  } else {
-    fprintf(stderr, "Failed to allocate method call message.\n");
+  if (ConnectProfile == nullptr) {
+    throw std::bad_alloc();
   }
+
+  char const * const Profile = UUID.c_str();
+  if (dbus_message_append_args
+      (ConnectProfile,
+       DBUS_TYPE_STRING, &Profile,
+       DBUS_TYPE_INVALID) == FALSE) {
+    throw std::runtime_error
+      ("Failed to append arguments to ConnectProfile message");
+  };
+
+  DBusError Error;
+  dbus_error_init(&Error);
+  DBusMessage *Reply = dbus_connection_send_with_reply_and_block
+    (Bluepairy->SystemBus, ConnectProfile, -1, &Error);
+  dbus_message_unref(ConnectProfile);
+  throwIfErrorIsSet(Error);
+  if (Reply == nullptr) {
+    throw std::bad_alloc();
+  }
+
+  dbus_set_error_from_message(&Error, Reply);
+  dbus_message_unref(Reply);
+  throwIfErrorIsSet(Error);
 }
 
-void Adapter::remove_device(Device const &device) const {
-  DBusMessage *msg =
-    dbus_message_new_method_call(BLUEZ_SERVICE, path().c_str(),
-				 ADAPTER_INTERFACE, "RemoveDevice");
-
-  if (msg) {
-    {
-      DBusMessageIter args;
-      dbus_message_iter_init_append(msg, &args);
-      dbus_message_iter_append_basic(&args, DBUS_TYPE_OBJECT_PATH,
-				     device.path().c_str());
-    }
-    DBusPendingCall *pending;
-
-    if (dbus_connection_send_with_reply(systemBus, msg, &pending, -1)) {
-      if (pending) {
-	dbus_connection_flush(systemBus);
-	dbus_message_unref(msg);
-	dbus_pending_call_block(pending);
-	msg = dbus_pending_call_steal_reply(pending);
-	if (msg) {
-	  DBusError error;
-	  dbus_error_init(&error);
-	  dbus_set_error_from_message(&error, msg);
-	  dbus_message_unref(msg);
-	  if (dbus_error_is_set(&error)) {
-	    std::runtime_error e(error.message);
-	    dbus_error_free(&error);
-	    throw e;
-	  }
-	} else {
-	  fprintf(stderr, "reply message is NULL.\n");
-	}
-	dbus_pending_call_unref(pending);
-      } else {
-	fprintf(stderr, "pending == NULL\n");
-      }
-    } else {
-      fprintf(stderr, "Failed to send message.\n");
-    }
-  } else {
-    fprintf(stderr, "Failed to allocate method call message.\n");
-  }
+std::shared_ptr<BlueZ::Adapter> Bluepairy::getAdapter(char const *Path)
+{
+  auto EqualPath = [Path](auto O) { return O->path() == Path; };
+  auto Pos = find_if(begin(Adapters), end(Adapters), EqualPath);
+  if (Pos != end(Adapters)) return *Pos;
+      
+  Adapters.emplace_back(std::make_shared<BlueZ::Adapter>(Path, this));
+  std::clog << "New adapter " << Path << std::endl;
+  return Adapters.back();
 }
 
-void Device::on_properties_changed(DBusMessageIter *properties) {
-  while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(properties)) {
-    DBusMessageIter property;
-    dbus_message_iter_recurse(properties, &property);
-    if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&property)) {
-      char const *propertyName;
-      dbus_message_iter_get_basic(&property,
-				  &propertyName);
-      dbus_message_iter_next(&property);
-      if (DBUS_TYPE_VARIANT ==
-	  dbus_message_iter_get_arg_type(&property)) {
-	DBusMessageIter value;
-	dbus_message_iter_recurse(&property, &value);
-	if (strcmp("Name", propertyName) == 0) {
-	  if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&value)) {
-	    char const *stringValue;
-	    dbus_message_iter_get_basic(&value, &stringValue);
-	    property_name = stringValue;
-	  }
-	} else if (strcmp(ADDRESS, propertyName) == 0) {
-	  if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&value)) {
-	    char const *stringValue;
-	    dbus_message_iter_get_basic(&value, &stringValue);
-	    property_address = stringValue;
-	  }
-	} else if (strcmp(PAIRED, propertyName) == 0) {
-	  if (DBUS_TYPE_BOOLEAN ==
-	      dbus_message_iter_get_arg_type(&value)) {
-	    dbus_bool_t boolValue;
-	    dbus_message_iter_get_basic(&value, &boolValue);
-	    property_paired = boolValue == TRUE;
-	  }
-	} else if (strcmp(CONNECTED, propertyName) == 0) {
-	  if (DBUS_TYPE_BOOLEAN ==
-	      dbus_message_iter_get_arg_type(&value)) {
-	    dbus_bool_t boolValue;
-	    dbus_message_iter_get_basic(&value, &boolValue);
-	    property_connected = boolValue == TRUE;
-	  }
-	} else if (strcmp("UUIDs", propertyName) == 0) {
-	  if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&value)) {
-	    DBusMessageIter uuids;
-
-	    dbus_message_iter_recurse(&value, &uuids);
-
-	    property_uuids.clear();
-	    while (DBUS_TYPE_STRING ==
-		   dbus_message_iter_get_arg_type(&uuids)) {
-	      char const *uuid;
-	      dbus_message_iter_get_basic(&uuids, &uuid);
-
-	      property_uuids.insert(uuid);
-	      dbus_message_iter_next(&uuids);
-	    }
-	  }
-	} else if (strcmp(ADAPTER, propertyName) == 0) {
-	  if (DBUS_TYPE_OBJECT_PATH ==
-	      dbus_message_iter_get_arg_type(&value)) {
-	    char const *objectPath;
-	    dbus_message_iter_get_basic(&value, &objectPath);
-	    if (objectPath) {
-	      property_adapter = get_adapter(objectPath);
-	    } else {
-	      property_adapter.reset();
-	    }
-	  }
-	}
-	assert(!dbus_message_iter_has_next(&property));
-      }
-    }
-    dbus_message_iter_next(properties);
-  }
+std::shared_ptr<BlueZ::Device> Bluepairy::getDevice(char const *Path)
+{
+  auto EqualPath = [Path](auto O) { return O->path() == Path; };
+  auto Pos = find_if(begin(Devices), end(Devices), EqualPath);
+  if (Pos != end(Devices)) return *Pos;
+      
+  Devices.push_back(std::make_shared<BlueZ::Device>(Path, this));
+  std::clog << "New device " << Path << std::endl;
+  return Devices.back();
 }
 
-void Device::pair() const {
-  DBusMessage *msg =
-    dbus_message_new_method_call(BLUEZ_SERVICE, path().c_str(),
-				 DEVICE_INTERFACE, "Pair");
+void Bluepairy::updateObjectProperties(DBusMessageIter *Object /* oa{sa{sv}} */)
+{
+  if (DBUS_TYPE_OBJECT_PATH == dbus_message_iter_get_arg_type(Object)) {
+    char const *Path;
 
-  if (msg) {
-    dbus_uint32_t serial = 1;
-    if (dbus_connection_send(systemBus, msg, &serial)) {
-      dbus_connection_flush(systemBus);
-      dbus_message_unref(msg);
-      while (true) {
-	read_messages();
-      }
-    } else {
-      fprintf(stderr, "Failed to send message.\n");
-    }
-  } else {
-    fprintf(stderr, "Failed to allocate method call message.\n");
-  }
-}
+    dbus_message_iter_get_basic(Object, &Path);
+    dbus_message_iter_next(Object);
+    if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(Object)) {
+      DBusMessageIter Interfaces;
 
-void init_bus() {
-  DBusError err;
-
-  dbus_error_init(&err);
-  systemBus = dbus_bus_get(DBUS_BUS_SYSTEM, &err);
-  if (dbus_error_is_set(&err)) {
-    std::runtime_error e(err.message);
-    dbus_error_free(&err);
-    throw e;
-  }
-  if (systemBus == NULL) throw std::bad_alloc();
-  dbus_bus_add_match(systemBus, "type='signal',sender='org.bluez'", &err);
-  if (dbus_error_is_set(&err)) {
-    std::runtime_error e(err.message);
-    dbus_error_free(&err);
-    dbus_connection_unref(systemBus);
-    throw e;
-  }
-}
-
-DBusMessage *get_managed_objects(char const *path, char const *interface) {
-  DBusMessage *msg =
-    dbus_message_new_method_call(interface, path,
-				 "org.freedesktop.DBus.ObjectManager",
-				 "GetManagedObjects");
-
-  if (msg) {
-    DBusPendingCall *pending;
-    if (!dbus_connection_send_with_reply(systemBus, msg, &pending, -1)) {
-      fprintf(stderr, "Failed to send!\n");
-      return NULL;
-    }
-    if (pending == NULL) {
-      fprintf(stderr, "PendingCall == NULL\n");
-      return NULL;
-    }
-    dbus_connection_flush(systemBus);
-    dbus_message_unref(msg);
-    dbus_pending_call_block(pending);
-    msg = dbus_pending_call_steal_reply(pending);
-    if (msg == NULL) {
-      fprintf(stderr, "Reply == NULL\n");
-      return NULL;
-    }
-    dbus_pending_call_unref(pending);
-  } else {
-    fprintf(stderr,
-	    "Failed to allocate GetManagedObjects method call message.\n");
-  }
-
-  return msg;
-}
-
-void update_object(DBusMessageIter *object) {
-  if (DBUS_TYPE_OBJECT_PATH == dbus_message_iter_get_arg_type(object)) {
-    char const *path;
-
-    dbus_message_iter_get_basic(object, &path);
-    dbus_message_iter_next(object);
-    if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(object)) {
-      DBusMessageIter interfaces;
-
-      dbus_message_iter_recurse(object, &interfaces);
+      dbus_message_iter_recurse(Object, &Interfaces);
       while (DBUS_TYPE_DICT_ENTRY ==
-	     dbus_message_iter_get_arg_type(&interfaces)) {
-	DBusMessageIter interface;
+             dbus_message_iter_get_arg_type(&Interfaces)) {
+        DBusMessageIter Interface;
 
-	dbus_message_iter_recurse(&interfaces, &interface);
-	if (DBUS_TYPE_STRING ==
-	    dbus_message_iter_get_arg_type(&interface)) {
-	  char const *interfaceName;
+        dbus_message_iter_recurse(&Interfaces, &Interface);
+        if (DBUS_TYPE_STRING ==
+            dbus_message_iter_get_arg_type(&Interface)) {
+          char const *InterfaceName;
 
-	  dbus_message_iter_get_basic(&interface, &interfaceName);
-	  if (strcmp(ADAPTER_INTERFACE, interfaceName) == 0) {
-	    auto adapter = get_adapter(path);
+          dbus_message_iter_get_basic(&Interface, &InterfaceName);
+          if (strcmp(BlueZ::Adapter::Interface, InterfaceName) == 0) {
+            dbus_message_iter_next(&Interface);
+            if (DBUS_TYPE_ARRAY ==
+                dbus_message_iter_get_arg_type(&Interface)) {
+              DBusMessageIter Properties;
 
-	    dbus_message_iter_next(&interface);
-	    if (DBUS_TYPE_ARRAY ==
-		dbus_message_iter_get_arg_type(&interface)) {
-	      DBusMessageIter properties;
+              dbus_message_iter_recurse(&Interface, &Properties);
+              getAdapter(Path)->onPropertiesChanged(&Properties);
 
-	      dbus_message_iter_recurse(&interface, &properties);
-	      adapter->on_properties_changed(&properties);
-
-	      assert(!dbus_message_iter_has_next(&interface));
-	    }
-	  } else if (strcmp(DEVICE_INTERFACE, interfaceName) == 0) {
-	    auto &device = get_device(path);
-
-	    dbus_message_iter_next(&interface);
-	    if (DBUS_TYPE_ARRAY ==
-		dbus_message_iter_get_arg_type(&interface)) {
-	      DBusMessageIter properties;
-	      dbus_message_iter_recurse(&interface, &properties);
-	      device.on_properties_changed(&properties);
-	      assert(!dbus_message_iter_has_next(&interface));
-	    }
-	  }
-	}
-	dbus_message_iter_next(&interfaces);
+              assert(dbus_message_iter_has_next(&Interface) == FALSE);
+            }
+          } else if (strcmp(BlueZ::Device::Interface, InterfaceName) == 0) {
+            dbus_message_iter_next(&Interface);
+            if (DBUS_TYPE_ARRAY ==
+                dbus_message_iter_get_arg_type(&Interface)) {
+              DBusMessageIter Properties;
+              dbus_message_iter_recurse(&Interface, &Properties);
+              getDevice(Path)->onPropertiesChanged(&Properties);
+              assert(dbus_message_iter_has_next(&Interface) == FALSE);
+            }
+          }
+        }
+        dbus_message_iter_next(&Interfaces);
       }
-      assert(!dbus_message_iter_has_next(object));
+      assert(dbus_message_iter_has_next(Object) == FALSE);
     }
   }
 }
 
-void get_bluez_objects() {
-  DBusMessage *msg = get_managed_objects("/", "org.bluez");
-  DBusMessageIter args;
+void Bluepairy::readWrite()
+{
+  DBusMessage *Incoming;
 
-  if (msg == NULL) {
-    throw std::runtime_error("GetManagedObjects didn't reply");
-  }
+  dbus_connection_read_write(SystemBus, 100);
 
-  if (!dbus_message_iter_init(msg, &args)) {
-    throw std::runtime_error("GetManagedObjects reply was empty");
-  }
+  while ((Incoming = dbus_connection_pop_message(SystemBus))) {
+    char const *Path = dbus_message_get_path(Incoming);
 
-  if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&args)) {
-    DBusMessageIter objects;
-
-    dbus_message_iter_recurse(&args, &objects);
-    while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(&objects)) {
-      DBusMessageIter object;
-
-      dbus_message_iter_recurse(&objects, &object);
-      update_object(&object);
-
-      dbus_message_iter_next(&objects);
-    }
-    assert(!dbus_message_iter_has_next(&args));
-  }
-
-  dbus_message_unref(msg);
-}
-
-void register_agent() {
-  DBusMessage *msg =
-    dbus_message_new_method_call(BLUEZ_SERVICE, "/org/bluez",
-				 "org.bluez.AgentManager1", "RegisterAgent");
-
-  if (msg) {
-    DBusMessageIter args;
-
-    dbus_message_iter_init_append(msg, &args);
-
-    char const * const AGENT_PATH = "/bluepair";
-    char const * const CAPABILITIES = "DisplayYesNo";
-    dbus_message_iter_append_basic(&args, DBUS_TYPE_OBJECT_PATH, &AGENT_PATH);
-    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &CAPABILITIES);
-
-    DBusError error;
-    dbus_error_init(&error);
-    DBusMessage *reply = dbus_connection_send_with_reply_and_block(systemBus, msg, -1, &error);
-    if (dbus_error_is_set(&error)) {
-      std::runtime_error e(error.message);
-      dbus_error_free(&error);
-      throw e;
-    }
-    dbus_message_unref(msg);
-    dbus_message_unref(reply);
-    dbus_error_free(&error);
-  } else {
-    throw std::runtime_error("Failed to allocate method call message");
-  }
-}
-
-void read_messages() {
-  DBusMessage *incoming;
-
-  dbus_connection_read_write(systemBus, 100);
-
-  while ((incoming = dbus_connection_pop_message(systemBus))) {
-    char const *path = dbus_message_get_path(incoming);
-
-    switch (dbus_message_get_type(incoming)) {
+    switch (dbus_message_get_type(Incoming)) {
     case DBUS_MESSAGE_TYPE_ERROR: {
-      DBusError error;
-      dbus_error_init(&error);
-      dbus_uint32_t reply_serial = dbus_message_get_reply_serial(incoming);
+      DBusError Error;
+      dbus_error_init(&Error);
+      dbus_uint32_t reply_serial = dbus_message_get_reply_serial(Incoming);
       // According to tests, reply_serial is wrong, bluez bug?
-      if (dbus_set_error_from_message(&error, incoming)) {
-	if (strcmp("org.bluez.Error.ConnectionAttemptFailed", error.name) == 0) {
-	  bluez::connection_attempt_failed e(error.message);
-	  dbus_error_free(&error);
-	  dbus_message_unref(incoming);
-	  throw e;
-	} else {
-	  std::runtime_error e(std::string{error.name} + ": " + error.message);
-	  dbus_error_free(&error);
-	  dbus_message_unref(incoming);
-	  throw e;
-	}
+      if (dbus_set_error_from_message(&Error, Incoming)) {
+        throwIfErrorIsSet(Error);
       }
       break;
     }
+
     case DBUS_MESSAGE_TYPE_METHOD_RETURN: {
-      dbus_uint32_t reply_serial = dbus_message_get_reply_serial(incoming);
-      std::cout << "Method return " << reply_serial << std::endl;
+      auto ReplySerial = dbus_message_get_reply_serial(Incoming);
+      std::cout << "Method return " << ReplySerial << std::endl;
       break;
     }
+
     case DBUS_MESSAGE_TYPE_METHOD_CALL:
-      std::cerr << "Method call" << std::endl;
+      if (dbus_message_has_path(Incoming, AgentPath)) {
+        if (dbus_message_is_method_call
+            (Incoming, BlueZ::Agent::Interface, "RequestPinCode") == TRUE) {
+          DBusMessageIter Args;
+
+          dbus_message_iter_init(Incoming, &Args);
+          if (DBUS_TYPE_OBJECT_PATH == dbus_message_iter_get_arg_type(&Args)) {
+            char const *Path;
+
+            dbus_message_iter_get_basic(&Args, &Path);
+            auto Device = getDevice(Path);
+            DBusMessage *Reply = dbus_message_new_method_return(Incoming);
+            if (Reply != nullptr) {
+              char const * const PIN = guessPIN(Device).c_str();
+              dbus_message_append_args(Reply, DBUS_TYPE_STRING, &PIN, DBUS_TYPE_INVALID);
+              dbus_connection_send(SystemBus, Reply, nullptr);
+              dbus_message_unref(Reply);
+              dbus_connection_flush(SystemBus);
+              std::clog << "RequestPinCode for " << Device->name()
+                        << " answered with " << PIN << std::endl;
+            }
+          }
+        } else if (dbus_message_is_method_call
+                   (Incoming, BlueZ::Agent::Interface, "RequestConfirmation")
+                   == TRUE) {
+          char const *Path;
+          dbus_uint32_t PassKey;
+          DBusError Error;
+          dbus_error_init(&Error);
+          if (dbus_message_get_args
+              (Incoming, &Error,
+               DBUS_TYPE_OBJECT_PATH, &Path,
+               DBUS_TYPE_UINT32, &PassKey,
+               DBUS_TYPE_INVALID) == FALSE) {
+            throw std::runtime_error
+              ("Failed to get arguments of RequestConfirmation message");
+          }
+          throwIfErrorIsSet(Error);
+          // A void reply indicates that we are confirm.
+          DBusMessage *Reply = dbus_message_new_method_return(Incoming);
+          if (Reply == nullptr) {
+            throw std::bad_alloc();
+          }
+          dbus_connection_send(SystemBus, Reply, nullptr);
+          dbus_message_unref(Reply);
+          dbus_connection_flush(SystemBus);
+          std::clog << "RequestConfirmation confirmed" << std::endl;
+        }
+      }
+      std::clog << "Method call "
+                << dbus_message_get_path(Incoming) << " "
+                << dbus_message_get_interface(Incoming) << " "
+                << dbus_message_get_member(Incoming)
+                << std::endl;
       break;
     case DBUS_MESSAGE_TYPE_SIGNAL:
-      if (dbus_message_has_interface(incoming,
-				     "org.freedesktop.DBus.Properties") &&
-	  dbus_message_has_member(incoming, "PropertiesChanged")) {
-	DBusMessageIter args;
+      if (dbus_message_is_signal
+          (Incoming, DBus::interface::Properties, "PropertiesChanged")
+          == TRUE) {
+        DBusMessageIter Args;
 
-	dbus_message_iter_init(incoming, &args);
+        dbus_message_iter_init(Incoming, &Args);
+        if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Args)) {
+          char const *InterfaceName;
 
-	if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&args)) {
-	  char const *interface;
+          dbus_message_iter_get_basic(&Args, &InterfaceName);
+          dbus_message_iter_next(&Args);
+          if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&Args)) {
+            DBusMessageIter Properties;
 
-	  dbus_message_iter_get_basic(&args, &interface);
-	  dbus_message_iter_next(&args);
-	  if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&args)) {
-	    DBusMessageIter properties;
+            dbus_message_iter_recurse(&Args, &Properties);
 
-	    dbus_message_iter_recurse(&args, &properties);
+            if (strcmp(BlueZ::Adapter::Interface, InterfaceName) == 0) {
+              getAdapter(Path)->onPropertiesChanged(&Properties);
+            } else if (strcmp(BlueZ::Device::Interface, InterfaceName) == 0) {
+              getDevice(Path)->onPropertiesChanged(&Properties);
+            }
+          }
+        }
+      } else if (dbus_message_has_interface(Incoming, DBus::interface::ObjectManager) == TRUE) {
+        if (dbus_message_has_member(Incoming, "InterfacesAdded") == TRUE) {
+          DBusMessageIter Args;
+          dbus_message_iter_init(Incoming, &Args);
 
-	    if (strcmp(ADAPTER_INTERFACE, interface) == 0) {
-	      auto adapter = get_adapter(path);
+          updateObjectProperties(&Args);
+        } else if (dbus_message_has_member(Incoming, "InterfacesRemoved") == TRUE) {
+          DBusMessageIter Args;
+          dbus_message_iter_init(Incoming, &Args);
 
-	      adapter->on_properties_changed(&properties);
-	    } else if (strcmp(DEVICE_INTERFACE, interface) == 0) {
-	      auto &device = get_device(path);
+          if (DBUS_TYPE_OBJECT_PATH == dbus_message_iter_get_arg_type(&Args)) {
+            char const *Path;
 
-	      device.on_properties_changed(&properties);
-	    }
-	  }
-	}
-      } else if (dbus_message_has_interface(incoming, "org.freedesktop.DBus.ObjectManager")) {
-	if (dbus_message_has_member(incoming, "InterfacesAdded")) {
-	  DBusMessageIter args;
-	  dbus_message_iter_init(incoming, &args);
+            dbus_message_iter_get_basic(&Args, &Path);
+            dbus_message_iter_next(&Args);
+            if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&Args)) {
+              DBusMessageIter Interfaces;
 
-	  update_object(&args);
-	} else if (dbus_message_has_member(incoming, "InterfacesRemoved")) {
-	}
+              dbus_message_iter_recurse(&Args, &Interfaces);
+              while (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Interfaces)) {
+                char const *InterfaceName;
+
+                dbus_message_iter_get_basic(&Interfaces, &InterfaceName);
+                if (strcmp(BlueZ::Adapter::Interface, InterfaceName) == 0) {
+                } else if (strcmp(BlueZ::Device::Interface, InterfaceName) == 0) {
+                }
+                dbus_message_iter_next(&Interfaces);
+              }
+            }
+          }
+        }
       }
-      fprintf(stderr, "Signal %s.%s\n", dbus_message_get_interface(incoming), dbus_message_get_member(incoming));
+      fprintf(stderr, "Signal %s.%s\n",
+              dbus_message_get_interface(Incoming),
+              dbus_message_get_member(Incoming));
       break;
     }
-    dbus_message_unref(incoming);
+    dbus_message_unref(Incoming);
   }
 }
 
+std::string Bluepairy::guessPIN(std::shared_ptr<BlueZ::Device> Device) const
+{
+  std::smatch Match;
+  std::regex HandyTech("(" "Actilino ALO"
+                       "|" "Active Braille AB4"
+                       "|" "Active Star AS4"
+                       "|" "Basic Braille BB4"
+                       "|" "Braille Star BS4"
+                       "|" "Braillino BL2"
+                       ")"
+                       "/" "[[:upper:]][[:digit:]]"
+                       "-" "([[:digit:]]+)");
+
+  if (regex_match(Device->name(), Match, HandyTech) && Match.size() == 3) {
+    std::string SerialNumber = Match[2];
+
+    if (SerialNumber.size() == 5) {
+      std::stringstream PINCode;
+
+      for (int I = 0; I < SerialNumber.size(); ++I) {
+        char Digit = ((SerialNumber[I] - '0' + I + 1) % 10) + '0';
+        PINCode << Digit;
+      }
+
+      return PINCode.str();
+    }
+  }
+
+  return "0000";
 }
