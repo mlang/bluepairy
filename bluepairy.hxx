@@ -23,8 +23,14 @@ namespace BlueZ {
   struct AlreadyExists : Error {
     AlreadyExists(char const *Message) : Error(Message) {}
   };
+  struct AuthenticationFailed: Error {
+    AuthenticationFailed(char const *Message) : Error(Message) {}
+  };
   struct AuthenticationRejected : Error {
     AuthenticationRejected(char const *Message) : Error(Message) {}
+  };
+  struct AuthenticationTimeout : Error {
+    AuthenticationTimeout(char const *Message) : Error(Message) {}
   };
   struct ConnectionAttemptFailed: Error {
     ConnectionAttemptFailed(char const *Message) : Error(Message) {}
@@ -47,6 +53,7 @@ namespace BlueZ {
 
   class Adapter final : public Object {
     std::string Address;
+    std::string Name;
     bool Powered;
     bool Discovering;
 
@@ -54,15 +61,18 @@ namespace BlueZ {
     static constexpr char const * const Interface = "org.bluez.Adapter1";
     struct Property {
       static constexpr char const * const Address = "Address";
+      static constexpr char const * const Name = "Name";
       static constexpr char const * const Discovering = "Discovering";
       static constexpr char const * const Powered = "Powered";
     };
-    Adapter(std::string const &Path, ::Bluepairy *Pairy) : Object(Path, Pairy) {
-    }
+    Adapter(std::string const &Path, ::Bluepairy *Pairy)
+    : Object(Path, Pairy) {}
 
+    bool exists() const;
     void onPropertiesChanged(DBusMessageIter *);
 
-    std::string address() const { return Address; }
+    std::string const &address() const { return Address; }
+    std::string const &name() const { return Name; }
     bool isPowered() const { return Powered; }
     void isPowered(bool);
     bool isDiscovering() const { return Discovering; }
@@ -92,6 +102,7 @@ namespace BlueZ {
     };
 
     Device(std::string const &Path, ::Bluepairy *Pairy) : Object(Path, Pairy) {}
+    bool exists() const;
 
     void onPropertiesChanged(DBusMessageIter *);
 
@@ -103,7 +114,6 @@ namespace BlueZ {
     std::set<std::string> const &profiles() const { return UUIDs; }
 
     void pair() const;
-    void forget() const { AdapterPtr->removeDevice(this); }
 
     void connectProfile(std::string) const;
   };
@@ -118,26 +128,31 @@ class Bluepairy final {
 
   std::vector<std::shared_ptr<BlueZ::Adapter>> Adapters;
   decltype(Adapters)::value_type getAdapter(char const *Path);
+  void removeAdapter(char const *Path);
     
   std::vector<std::shared_ptr<BlueZ::Device>> Devices;
   decltype(Devices)::value_type getDevice(char const *Path);
-    
+  void removeDevice(char const *Path);
+
   void updateObjectProperties(DBusMessageIter *);
 
-  void readWrite();
-    
   friend class BlueZ::Adapter;
   friend class BlueZ::AgentManager;
   friend class BlueZ::Device;
 
 public:
-  Bluepairy(std::string const &Pattern, std::vector<std::string> const &UUIDs);
+  Bluepairy(std::string const &Pattern, std::vector<std::string> UUIDs);
   Bluepairy(Bluepairy const &) = delete;
   Bluepairy(Bluepairy &&) = delete;
   Bluepairy &operator= (Bluepairy &&) = delete;
   Bluepairy &operator= (Bluepairy const &) = delete;
-  ~Bluepairy() { dbus_connection_unref(SystemBus); }
+  ~Bluepairy() {
+    dbus_connection_close(SystemBus);
+    dbus_connection_unref(SystemBus);
+  }
 
+  void readWrite();
+    
   bool nameMatches(std::shared_ptr<BlueZ::Device> Device) const {
     return regex_search(Device->name(), Pattern, std::regex_constants::match_not_null);
   }
@@ -148,21 +163,50 @@ public:
                           std::back_inserter(intersection));
     return intersection == ExpectedUUIDs;
   }
-  std::vector<std::shared_ptr<BlueZ::Device>> usableDevices() const {
-    decltype(Devices) Result(Devices.size());
-    auto isUsable = [this](auto Device) -> bool {
-      return Device->adapter()->isPowered() && Device->isPaired() &&
-             this->nameMatches(Device) && this->hasExpectedProfiles(Device);
-    };
-    
-    Result.resize
-      (std::distance(begin(Result),
-                     copy_if(begin(Devices), end(Devices), begin(Result),
-                             isUsable)));
+  decltype(Devices) usableDevices() const {
+    decltype(Devices) Result;
+    for (auto Device: Devices) {
+      if (Device->adapter()->isPowered() && Device->isPaired() &&
+	  this->nameMatches(Device) && this->hasExpectedProfiles(Device)) {
+	Result.push_back(Device);
+      }
+    }
 
     return Result;
   }
-  std::string guessPIN(std::shared_ptr<BlueZ::Device> Device) const;
+
+  decltype(Devices) pairableDevices() const {
+    decltype(Devices) Result;
+    for (auto Device: Devices) {
+      if (Device->adapter()->exists() && Device->adapter()->isPowered() &&
+	  !Device->isPaired() && this->nameMatches(Device) &&
+	  this->hasExpectedProfiles(Device)) {
+	Result.push_back(Device);
+      }
+    }
+
+    return Result;
+  }
+
+  decltype(Adapters) poweredAdapters() const {
+    decltype(Adapters) Result;
+
+    for (auto Adapter: Adapters) {
+      if (Adapter->isPowered()) {
+	Result.push_back(Adapter);
+      }
+    }
+
+    return Result;
+  }
+
+  std::string guessPIN(std::shared_ptr<BlueZ::Device>) const;
+
+  void powerUpAllAdapters();
+  bool isDiscovering() const;
+  bool startDiscovery();
+
+  void forgetDevice(decltype(Devices)::value_type);
 };
 
 #endif // BLUEPAIRY_HPP

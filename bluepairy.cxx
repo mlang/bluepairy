@@ -1,3 +1,4 @@
+#include <chrono>
 #include <iostream>
 
 #include <boost/program_options.hpp>
@@ -14,6 +15,8 @@ int main(int argc, char *argv[])
   using options_description = boost::program_options::options_description;
   using positional_options_description = boost::program_options::positional_options_description;
   using required_option = boost::program_options::required_option;
+  using seconds = std::chrono::seconds;
+  using steady_clock = std::chrono::steady_clock;
   using unknown_option = boost::program_options::unknown_option;
   using variables_map = boost::program_options::variables_map;
 
@@ -75,29 +78,69 @@ int main(int argc, char *argv[])
   }
 
   Bluepairy Bluetooth(FriendlyName, UUIDs);
-  auto done = [&Bluetooth]() {
-    auto UsableDevices = Bluetooth.usableDevices();
+  auto StartTime = steady_clock::now();
 
-    if (!UsableDevices.empty()) {
-      std::cout << "Found "
-                << (UsableDevices.size() == 1? "one matching device"
-                                             : "several usable matches")
-                << ":" << std::endl;
-      for (auto Device: UsableDevices) {
-        std::cout << Device->name() << " (" << Device->address()
-                  << ") paired via " << Device->adapter()->address()
-                  << std::endl;
+  Bluetooth.powerUpAllAdapters();
+
+  while (Bluetooth.usableDevices().empty()) {
+    Bluetooth.readWrite();
+
+    {
+      auto PairableDevices = Bluetooth.pairableDevices();
+
+      if (!PairableDevices.empty()) {
+	for (auto Device: PairableDevices) {
+	  std::clog << "Trying to pair with " << Device->name() << std::endl;
+	  try {
+	    Device->pair();
+	    do { Bluetooth.readWrite(); } while (!Device->isPaired());
+	    std::clog << "Done pairing!" << std::endl;
+	  } catch (BlueZ::Error &E) {
+	    std::cerr << "Failed to pair with " << Device->name()
+		    << ": " << E.what() << std::endl;
+	    Bluetooth.forgetDevice(Device);
+	    std::clog << "Forgot device " << Device->name() << std::endl;
+	  }
+	}
+      } else if (!Bluetooth.isDiscovering()) {
+	if (Bluetooth.startDiscovery()) {
+	  std::cout << "Started discovery mode" << std::endl;
+	}
       }
-
-      return true;
     }
 
-    return false;
-  };
+    if (steady_clock::now() - StartTime > seconds(30)) {
+      std::cout << "Giving up, sorry." << std::endl;
 
-  if (done()) {
+      return EXIT_FAILURE;
+    }
+  }
+
+  auto UsableDevices = Bluetooth.usableDevices();
+
+  if (UsableDevices.size() == 1) {
+    auto Device = UsableDevices.front();
+    for (auto UUID: UUIDs) {
+      std::clog << "Connecting " << UUID << std::endl;
+      Device->connectProfile(UUID);
+    }
+  }
+
+  if (!UsableDevices.empty()) {
+    std::cout << "Found "
+	      << (UsableDevices.size() == 1? "one matching device"
+		  : "several usable matches")
+	      << ":" << std::endl;
+    for (auto Device: UsableDevices) {
+      std::cout << Device->name() << " (" << Device->address()
+		<< ") paired via " << Device->adapter()->address()
+		<< std::endl;
+    }
+
     return EXIT_SUCCESS;
   }
+
+  return EXIT_FAILURE;
 }
 
 namespace {
@@ -111,9 +154,19 @@ namespace {
         BlueZ::AlreadyExists E(Error.message);
         dbus_error_free(&Error);
         throw E;
+      } else if (strcmp("org.bluez.Error.AuthenticationFailed",
+                        Error.name) == 0) {
+        BlueZ::AuthenticationFailed E(Error.message);
+        dbus_error_free(&Error);
+        throw E;
       } else if (strcmp("org.bluez.Error.AuthenticationRejected",
                         Error.name) == 0) {
         BlueZ::AuthenticationRejected E(Error.message);
+        dbus_error_free(&Error);
+        throw E;
+      } else if (strcmp("org.bluez.Error.AuthenticationTimeout",
+                        Error.name) == 0) {
+        BlueZ::AuthenticationTimeout E(Error.message);
         dbus_error_free(&Error);
         throw E;
       } else if (strcmp("org.bluez.Error.ConnectionAttemptFailed",
@@ -201,14 +254,14 @@ namespace DBus {
 constexpr char const * const Bluepairy::AgentPath;
 
 Bluepairy::Bluepairy
-( std::string const &Pattern, std::vector<std::string> const &UUIDs )
+( std::string const &Pattern, std::vector<std::string> UUIDs )
 : Pattern(Pattern)
-, ExpectedUUIDs(UUIDs)
-, SystemBus([]() {
+, ExpectedUUIDs(std::move(UUIDs))
+, SystemBus([] {
     DBusError Error;
     dbus_error_init(&Error);
 
-    auto Bus = dbus_bus_get(DBUS_BUS_SYSTEM, &Error);
+    auto Bus = dbus_bus_get_private(DBUS_BUS_SYSTEM, &Error);
     throwIfErrorIsSet(Error);
 
     if (Bus == nullptr) {
@@ -225,6 +278,8 @@ Bluepairy::Bluepairy
   dbus_error_init(&Error);
   dbus_bus_add_match(SystemBus, "type='signal',sender='org.bluez'", &Error);
   throwIfErrorIsSet(Error);
+
+  readWrite();
 
   { // Get managed objects
     DBusMessage *GetManagedObjects = dbus_message_new_method_call
@@ -265,6 +320,14 @@ Bluepairy::Bluepairy
   AgentManager.registerAgent(AgentPath, "DisplayYesNo");
 }
 
+bool BlueZ::Adapter::exists() const {
+  for (auto Adapter: Bluepairy->Adapters) {
+    if (Adapter.get() == this) return true;
+  }
+
+  return false;
+}
+
 void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}... */)
 {
   while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(Properties)) {
@@ -288,6 +351,7 @@ void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}
           if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
             dbus_bool_t BoolValue;
             dbus_message_iter_get_basic(&Value, &BoolValue);
+	    std::clog << "Set discovering to " << (BoolValue == TRUE? "true" : "false") << std::endl;
             Discovering = BoolValue == TRUE;
           }
         } else if (strcmp(Property::Address, PropertyName) == 0) {
@@ -295,6 +359,12 @@ void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}
             char const *StringValue;
             dbus_message_iter_get_basic(&Value, &StringValue);
             Address = StringValue;
+          }
+        } else if (strcmp(Property::Name, PropertyName) == 0) {
+          if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Value)) {
+            char const *StringValue;
+            dbus_message_iter_get_basic(&Value, &StringValue);
+            Name = StringValue;
           }
         }
         assert(!dbus_message_iter_has_next(&Property));
@@ -358,11 +428,16 @@ void BlueZ::Adapter::removeDevice(BlueZ::Device const *Device) const
 {
   DBusMessage *RemoveDevice = dbus_message_new_method_call
     (Service, path().c_str(), Interface, "RemoveDevice");
-  if (!RemoveDevice) throw std::bad_alloc();
+  if (RemoveDevice == nullptr) {
+    throw std::bad_alloc();
+  }
 
-  DBusMessageIter Args;
-  dbus_message_iter_init_append(RemoveDevice, &Args);
-  dbus_message_iter_append_basic(&Args, DBUS_TYPE_OBJECT_PATH, Device->path().c_str());
+  char const * const Path = Device->path().c_str();
+  if (dbus_message_append_args
+      (RemoveDevice, DBUS_TYPE_OBJECT_PATH, &Path, DBUS_TYPE_INVALID) == FALSE) {
+    throw std::runtime_error
+      ("Failed to append arguments to RemoveDevice message");
+  }
 
   DBusError Error;
   dbus_error_init(&Error);
@@ -373,6 +448,14 @@ void BlueZ::Adapter::removeDevice(BlueZ::Device const *Device) const
   dbus_set_error_from_message(&Error, Reply);
   dbus_message_unref(Reply);
   throwIfErrorIsSet(Error);
+}
+
+bool BlueZ::Device::exists() const {
+  for (auto Device: Bluepairy->Devices) {
+    if (Device.get() == this) return true;
+  }
+
+  return false;
 }
 
 void BlueZ::Device::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}... */)
@@ -505,6 +588,17 @@ std::shared_ptr<BlueZ::Adapter> Bluepairy::getAdapter(char const *Path)
   return Adapters.back();
 }
 
+void Bluepairy::removeAdapter(char const *Path)
+{
+  auto EqualPath = [Path](auto O) { return O->path() == Path; };
+  auto Pos = find_if(begin(Adapters), end(Adapters), EqualPath);
+  if (Pos != end(Adapters)) {
+    Adapters.erase(Pos);
+  } else {
+    std::clog << "WARNING: Tried to remove adapter we never knew about." << std::endl;
+  }
+}
+
 std::shared_ptr<BlueZ::Device> Bluepairy::getDevice(char const *Path)
 {
   auto EqualPath = [Path](auto O) { return O->path() == Path; };
@@ -514,6 +608,17 @@ std::shared_ptr<BlueZ::Device> Bluepairy::getDevice(char const *Path)
   Devices.push_back(std::make_shared<BlueZ::Device>(Path, this));
   std::clog << "New device " << Path << std::endl;
   return Devices.back();
+}
+
+void Bluepairy::removeDevice(char const *Path)
+{
+  auto EqualPath = [Path](auto O) { return O->path() == Path; };
+  auto Pos = find_if(begin(Devices), end(Devices), EqualPath);
+  if (Pos != end(Devices)) {
+    Devices.erase(Pos);
+  } else {
+    std::clog << "WARNING: Tried to remove device we never knew about." << std::endl;
+  }
 }
 
 void Bluepairy::updateObjectProperties(DBusMessageIter *Object /* oa{sa{sv}} */)
@@ -632,7 +737,7 @@ void Bluepairy::readWrite()
               ("Failed to get arguments of RequestConfirmation message");
           }
           throwIfErrorIsSet(Error);
-          // A void reply indicates that we are confirm.
+          // A void reply indicates that we confirm.
           DBusMessage *Reply = dbus_message_new_method_return(Incoming);
           if (Reply == nullptr) {
             throw std::bad_alloc();
@@ -697,7 +802,9 @@ void Bluepairy::readWrite()
 
                 dbus_message_iter_get_basic(&Interfaces, &InterfaceName);
                 if (strcmp(BlueZ::Adapter::Interface, InterfaceName) == 0) {
+		  removeAdapter(Path);
                 } else if (strcmp(BlueZ::Device::Interface, InterfaceName) == 0) {
+		  removeDevice(Path);
                 }
                 dbus_message_iter_next(&Interfaces);
               }
@@ -743,4 +850,59 @@ std::string Bluepairy::guessPIN(std::shared_ptr<BlueZ::Device> Device) const
   }
 
   return "0000";
+}
+
+void Bluepairy::powerUpAllAdapters() {
+  for (auto Adapter: Adapters) {
+    if (!Adapter->isPowered()) {
+      std::clog << "Powering up adapter " << Adapter->name() << std::endl;
+      Adapter->isPowered(true);
+      auto StartTime = std::chrono::steady_clock::now();
+      do {
+	readWrite();
+      } while (Adapter->exists() && !Adapter->isPowered() &&
+	       std::chrono::steady_clock::now() - StartTime < std::chrono::seconds(1));
+      if (Adapter->isPowered()) {
+	std::clog << "Adapter " << Adapter->name()
+		  << " is now powered up." << std::endl;
+      } else {
+	std::cerr << "Failed to power up adapter "
+		  << Adapter->name() << ", ignored."
+		  << std::endl;
+      }
+    }
+  }
+}
+
+bool Bluepairy::isDiscovering() const {
+  for (auto Adapter: Adapters) {
+    if (Adapter->isPowered() && Adapter->isDiscovering()) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool Bluepairy::startDiscovery() {
+  bool Started = false;
+
+  for (auto Adapter: poweredAdapters()) {
+    if (!Adapter->isDiscovering()) {
+      Adapter->startDiscovery();
+      do { readWrite(); } while (Adapter->exists() && !Adapter->isDiscovering());
+      if (Adapter->exists() && Adapter->isDiscovering()) {
+	Started = true;
+      }
+    }
+  }
+
+  return Started;
+}
+
+void Bluepairy::forgetDevice(std::shared_ptr<BlueZ::Device> Device) {
+  Device->adapter()->removeDevice(Device.get());
+  while (Device->exists()) {
+    readWrite();
+  }
 }
