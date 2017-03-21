@@ -1,6 +1,7 @@
 [Unit]
 Requires=bluetooth.target
 After=bluetooth.target
+Before=brltty.service
 
 [Service]
 Type=oneshot

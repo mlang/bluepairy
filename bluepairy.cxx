@@ -15,7 +15,7 @@ int main(int argc, char *argv[])
   using options_description = boost::program_options::options_description;
   using positional_options_description = boost::program_options::positional_options_description;
   using required_option = boost::program_options::required_option;
-  using seconds = std::chrono::seconds;
+  using minutes = std::chrono::minutes;
   using steady_clock = std::chrono::steady_clock;
   using unknown_option = boost::program_options::unknown_option;
   using variables_map = boost::program_options::variables_map;
@@ -109,7 +109,7 @@ int main(int argc, char *argv[])
       }
     }
 
-    if (steady_clock::now() - StartTime > seconds(30)) {
+    if (steady_clock::now() - StartTime > minutes(5)) {
       std::cout << "Giving up, sorry." << std::endl;
 
       return EXIT_FAILURE;
