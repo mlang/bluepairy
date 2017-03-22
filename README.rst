@@ -16,14 +16,14 @@ is provided and installed by default.
 Installation
 ------------
 
-.. code-block: shell
+.. code-block:: shell
 
   $ make install
 
 If you are using bluepairy to ensure a pairing between your
 Raspberry Pi Zero and your Handy Tech Active Star 40, you can run
 
-.. code-block: shell
+.. code-block:: shell
 
   $ sudo systemctl enable bluepairy-active-star.service
 
