@@ -126,8 +126,14 @@ int main(int argc, char *argv[])
   if (UsableDevices.size() == 1) {
     auto Device = UsableDevices.front();
     for (auto UUID: UUIDs) {
-      std::clog << "Connecting " << UUID << std::endl;
-      Device->connectProfile(UUID);
+      std::clog << "Trying to connect to " << UUID << std::endl;
+      try {
+	Device->connectProfile(UUID);
+      } catch (BlueZ::Error &E) {
+	std::cerr << "Failed to connect to " << UUID << ": "
+		  << E.what() << std::endl;
+	return EXIT_FAILURE;
+      }
     }
   }
 
