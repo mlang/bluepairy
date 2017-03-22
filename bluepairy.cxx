@@ -94,23 +94,24 @@ int main(int argc, char *argv[])
       auto PairableDevices = Bluetooth.pairableDevices();
 
       if (!PairableDevices.empty()) {
-	for (auto Device: PairableDevices) {
-	  std::clog << "Trying to pair with " << Device->name() << std::endl;
-	  try {
-	    Device->pair();
-	    do { Bluetooth.readWrite(); } while (!Device->isPaired());
-	    std::clog << "Done pairing!" << std::endl;
-	  } catch (BlueZ::Error &E) {
-	    std::cerr << "Failed to pair with " << Device->name()
-		    << ": " << E.what() << std::endl;
-	    Bluetooth.forgetDevice(Device);
-	    std::clog << "Forgot device " << Device->name() << std::endl;
-	  }
-	}
+        for (auto Device: PairableDevices) {
+          std::clog << "Trying to pair with " << Device->name() << std::endl;
+          try {
+            Device->pair();
+            do { Bluetooth.readWrite(); } while (!Device->isPaired());
+            std::clog << "Paired successfully with "
+                      << Device->name() << std::endl;
+          } catch (BlueZ::Error &E) {
+            std::cerr << "Failed to pair with " << Device->name()
+                      << ": " << E.what() << std::endl;
+            Bluetooth.forgetDevice(Device);
+            std::clog << "Forgot device " << Device->name() << std::endl;
+          }
+        }
       } else if (!Bluetooth.isDiscovering()) {
-	if (Bluetooth.startDiscovery()) {
-	  std::cout << "Started discovery mode" << std::endl;
-	}
+        if (Bluetooth.startDiscovery()) {
+          std::cout << "Started discovery mode" << std::endl;
+        }
       }
     }
 
@@ -128,24 +129,24 @@ int main(int argc, char *argv[])
     for (auto UUID: UUIDs) {
       std::clog << "Trying to connect to " << UUID << std::endl;
       try {
-	Device->connectProfile(UUID);
+        Device->connectProfile(UUID);
       } catch (BlueZ::Error &E) {
-	std::cerr << "Failed to connect to " << UUID << ": "
-		  << E.what() << std::endl;
-	return EXIT_FAILURE;
+        std::cerr << "Failed to connect to " << UUID << ": "
+                  << E.what() << std::endl;
+        return EXIT_FAILURE;
       }
     }
   }
 
   if (!UsableDevices.empty()) {
     std::cout << "Found "
-	      << (UsableDevices.size() == 1? "one matching device"
-		  : "several usable matches")
-	      << ":" << std::endl;
+              << (UsableDevices.size() == 1? "one matching device"
+                  : "several usable matches")
+              << ":" << std::endl;
     for (auto Device: UsableDevices) {
       std::cout << Device->name() << " (" << Device->address()
-		<< ") paired via " << Device->adapter()->address()
-		<< std::endl;
+                << ") paired via " << Device->adapter()->address()
+                << std::endl;
     }
 
     return EXIT_SUCCESS;
@@ -366,7 +367,7 @@ void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}
           if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
             dbus_bool_t BoolValue;
             dbus_message_iter_get_basic(&Value, &BoolValue);
-	    std::clog << "Set discovering to " << (BoolValue == TRUE? "true" : "false") << std::endl;
+            std::clog << "Set discovering to " << (BoolValue == TRUE? "true" : "false") << std::endl;
             Discovering = BoolValue == TRUE;
           }
         } else if (strcmp(Property::Address, PropertyName) == 0) {
@@ -621,7 +622,6 @@ std::shared_ptr<BlueZ::Device> Bluepairy::getDevice(char const *Path)
   if (Pos != end(Devices)) return *Pos;
       
   Devices.push_back(std::make_shared<BlueZ::Device>(Path, this));
-  std::clog << "New device " << Path << std::endl;
   return Devices.back();
 }
 
@@ -817,9 +817,9 @@ void Bluepairy::readWrite()
 
                 dbus_message_iter_get_basic(&Interfaces, &InterfaceName);
                 if (strcmp(BlueZ::Adapter::Interface, InterfaceName) == 0) {
-		  removeAdapter(Path);
+                  removeAdapter(Path);
                 } else if (strcmp(BlueZ::Device::Interface, InterfaceName) == 0) {
-		  removeDevice(Path);
+                  removeDevice(Path);
                 }
                 dbus_message_iter_next(&Interfaces);
               }
@@ -874,16 +874,16 @@ void Bluepairy::powerUpAllAdapters() {
       Adapter->isPowered(true);
       auto StartTime = std::chrono::steady_clock::now();
       do {
-	readWrite();
+        readWrite();
       } while (Adapter->exists() && !Adapter->isPowered() &&
-	       std::chrono::steady_clock::now() - StartTime < std::chrono::seconds(1));
+               std::chrono::steady_clock::now() - StartTime < std::chrono::seconds(1));
       if (Adapter->isPowered()) {
-	std::clog << "Adapter " << Adapter->name()
-		  << " is now powered up." << std::endl;
+        std::clog << "Adapter " << Adapter->name()
+                  << " is now powered up." << std::endl;
       } else {
-	std::cerr << "Failed to power up adapter "
-		  << Adapter->name() << ", ignored."
-		  << std::endl;
+        std::cerr << "Failed to power up adapter "
+                  << Adapter->name() << ", ignored."
+                  << std::endl;
       }
     }
   }
@@ -907,7 +907,7 @@ bool Bluepairy::startDiscovery() {
       Adapter->startDiscovery();
       do { readWrite(); } while (Adapter->exists() && !Adapter->isDiscovering());
       if (Adapter->exists() && Adapter->isDiscovering()) {
-	Started = true;
+        Started = true;
       }
     }
   }

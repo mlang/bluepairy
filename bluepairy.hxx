@@ -170,8 +170,8 @@ public:
     decltype(Devices) Result;
     for (auto Device: Devices) {
       if (Device->adapter()->isPowered() && Device->isPaired() &&
-	  this->nameMatches(Device) && this->hasExpectedProfiles(Device)) {
-	Result.push_back(Device);
+          this->nameMatches(Device) && this->hasExpectedProfiles(Device)) {
+        Result.push_back(Device);
       }
     }
 
@@ -182,9 +182,9 @@ public:
     decltype(Devices) Result;
     for (auto Device: Devices) {
       if (Device->adapter()->exists() && Device->adapter()->isPowered() &&
-	  !Device->isPaired() && this->nameMatches(Device) &&
-	  this->hasExpectedProfiles(Device)) {
-	Result.push_back(Device);
+          !Device->isPaired() && this->nameMatches(Device) &&
+          this->hasExpectedProfiles(Device)) {
+        Result.push_back(Device);
       }
     }
 
@@ -196,7 +196,7 @@ public:
 
     for (auto Adapter: Adapters) {
       if (Adapter->isPowered()) {
-	Result.push_back(Adapter);
+        Result.push_back(Adapter);
       }
     }
 
