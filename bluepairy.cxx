@@ -23,10 +23,10 @@ int main(int argc, char *argv[])
   options_description Desc("Allowed options");
   Desc.add_options()
   ("help,?", "print usage message")
-    ("friendly-name,n", boost::program_options::value(&FriendlyName)->required(),
+  ("friendly-name,n", boost::program_options::value(&FriendlyName)->required(),
    "Device name (regex)")
-    ("profile-uuid,u", boost::program_options::value(&UUIDs), "UUID (regex)")
-  ("hidp", "Require HID profile to be present")
+  ("connect,c", boost::program_options::value(&UUIDs), "UUID (regex)")
+  ("hid", "Connect to Human Interface Device Service")
   ;
 
   positional_options_description PositionalDesc;
@@ -66,7 +66,7 @@ int main(int argc, char *argv[])
     }
   }
 
-  if (VariablesMap.count("hidp") > 0) {
+  if (VariablesMap.count("hid") > 0) {
     UUIDs.push_back("00001124-0000-1000-8000-00805f9b34fb");
   }
 
@@ -79,7 +79,6 @@ int main(int argc, char *argv[])
 
   Bluepairy Bluetooth(FriendlyName, UUIDs);
   auto StartTime = SteadyClock::now();
-  auto Timeout = minutes(5);
 
   Bluetooth.powerUpAllAdapters();
 
@@ -115,7 +114,7 @@ int main(int argc, char *argv[])
       }
     }
 
-    if (SteadyClock::now() - StartTime > Timeout) {
+    if (SteadyClock::now() - StartTime > minutes(5)) {
       std::cout << "Giving up, sorry." << std::endl;
 
       return EXIT_FAILURE;

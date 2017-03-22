@@ -6,7 +6,7 @@ Before=brltty.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/bluepairy --hidp 'Active Star AS4'
+ExecStart=/usr/local/sbin/bluepairy --hid 'Active Star AS4'
 
 [Install]
 WantedBy=brltty.service
