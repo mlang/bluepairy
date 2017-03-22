@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
   }
 
   if (VariablesMap.count("hidp") > 0) {
-    UUIDs.push_back("00000011-0000-1000-8000-00805f9b34fb");
+    UUIDs.push_back("00001124-0000-1000-8000-00805f9b34fb");
   }
 
   if (!UUIDs.empty()) {
