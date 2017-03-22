@@ -35,6 +35,9 @@ namespace BlueZ {
   struct ConnectionAttemptFailed: Error {
     ConnectionAttemptFailed(char const *Message) : Error(Message) {}
   };
+  struct Failed: Error {
+    Failed(char const *Message) : Error(Message) {}
+  };
 
   class Object {
     std::string const Path;

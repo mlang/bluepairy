@@ -16,7 +16,7 @@ int main(int argc, char *argv[])
   using positional_options_description = boost::program_options::positional_options_description;
   using required_option = boost::program_options::required_option;
   using minutes = std::chrono::minutes;
-  using steady_clock = std::chrono::steady_clock;
+  using SteadyClock = std::chrono::steady_clock;
   using unknown_option = boost::program_options::unknown_option;
   using variables_map = boost::program_options::variables_map;
 
@@ -78,9 +78,14 @@ int main(int argc, char *argv[])
   }
 
   Bluepairy Bluetooth(FriendlyName, UUIDs);
-  auto StartTime = steady_clock::now();
+  auto StartTime = SteadyClock::now();
+  auto Timeout = minutes(5);
 
   Bluetooth.powerUpAllAdapters();
+
+  if (Bluetooth.poweredAdapters().empty()) {
+    std::cout << "No Bluetooth adapters available yet." << std::endl;
+  }
 
   while (Bluetooth.usableDevices().empty()) {
     Bluetooth.readWrite();
@@ -109,7 +114,7 @@ int main(int argc, char *argv[])
       }
     }
 
-    if (steady_clock::now() - StartTime > minutes(5)) {
+    if (SteadyClock::now() - StartTime > Timeout) {
       std::cout << "Giving up, sorry." << std::endl;
 
       return EXIT_FAILURE;
@@ -172,6 +177,10 @@ namespace {
       } else if (strcmp("org.bluez.Error.ConnectionAttemptFailed",
                         Error.name) == 0) {
         BlueZ::ConnectionAttemptFailed E(Error.message);
+        dbus_error_free(&Error);
+        throw E;
+      } else if (strcmp("org.bluez.Error.Failed", Error.name) == 0) {
+        BlueZ::Failed E(Error.message);
         dbus_error_free(&Error);
         throw E;
       }
