@@ -367,7 +367,6 @@ void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}
           if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
             dbus_bool_t BoolValue;
             dbus_message_iter_get_basic(&Value, &BoolValue);
-            std::clog << "Set discovering to " << (BoolValue == TRUE? "true" : "false") << std::endl;
             Discovering = BoolValue == TRUE;
           }
         } else if (strcmp(Property::Address, PropertyName) == 0) {
@@ -600,7 +599,6 @@ std::shared_ptr<BlueZ::Adapter> Bluepairy::getAdapter(char const *Path)
   if (Pos != end(Adapters)) return *Pos;
       
   Adapters.emplace_back(std::make_shared<BlueZ::Adapter>(Path, this));
-  std::clog << "New adapter " << Path << std::endl;
   return Adapters.back();
 }
 
