@@ -531,13 +531,13 @@ void BlueZ::Device::pair() const
 {
   DBusMessage *Pair = dbus_message_new_method_call
     (Service, path().c_str(), Interface, "Pair");
-  if (!Pair) throw std::bad_alloc();
+  if (!Pair) {
+    throw std::bad_alloc();
+  }
 
-  dbus_uint32_t Serial;
-  if (dbus_connection_send(Bluepairy->SystemBus, Pair, &Serial)) {
-    std::cout << "Outgoing serial " << Serial << std::endl;
+  if (dbus_connection_send(Bluepairy->SystemBus, Pair, nullptr)) {
     dbus_message_unref(Pair);
-    while (true) {
+    while (exists() && !isPaired()) {
       Bluepairy->readWrite();
     }
   } else {
