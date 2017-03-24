@@ -224,20 +224,24 @@ namespace BlueZ {
 
     void registerAgent(char const *AgentPath, char const *Capabilities) const
     {
-      auto RegisterAgent = BlueZ::newMethodCall
-        (path().c_str(), Interface, "RegisterAgent");
+      DBus::PendingCall PendingCall;
 
-      if (dbus_message_append_args
-          (RegisterAgent,
-           DBUS_TYPE_OBJECT_PATH, &AgentPath,
-           DBUS_TYPE_STRING, &Capabilities,
-           DBUS_TYPE_INVALID) == FALSE) {
-        throw std::runtime_error
-          ("Failed to append arguments to RegisterAgent message");
+      {
+	auto RegisterAgent = BlueZ::newMethodCall
+	  (path().c_str(), Interface, "RegisterAgent");
+
+	if (dbus_message_append_args
+	    (RegisterAgent,
+	     DBUS_TYPE_OBJECT_PATH, &AgentPath,
+	     DBUS_TYPE_STRING, &Capabilities,
+	     DBUS_TYPE_INVALID) == FALSE) {
+	  throw std::runtime_error
+	    ("Failed to append arguments to RegisterAgent message");
+	}
+
+	PendingCall.send(Bluepairy->SystemBus, std::move(RegisterAgent));
       }
 
-      DBus::PendingCall PendingCall;
-      PendingCall.send(Bluepairy->SystemBus, std::move(RegisterAgent));
       dbus_message_unref(PendingCall.get());
     }
   };
@@ -724,7 +728,7 @@ void Bluepairy::readWrite()
 {
   DBusMessage *Incoming;
 
-  dbus_connection_read_write(SystemBus, 100);
+  dbus_connection_read_write(SystemBus, 10);
 
   while ((Incoming = dbus_connection_pop_message(SystemBus))) {
     char const *Path = dbus_message_get_path(Incoming);
