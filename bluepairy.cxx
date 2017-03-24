@@ -1,4 +1,5 @@
 #include <chrono>
+#include <fstream>
 #include <iostream>
 
 #include <boost/program_options.hpp>
@@ -9,6 +10,7 @@ int main(int argc, char *argv[])
 {
   std::string FriendlyName;
   std::vector<std::string> UUIDs;
+  std::string BRLTTYConf;
 
   using command_line_parser = boost::program_options::command_line_parser;
   using invalid_command_line_syntax = boost::program_options::invalid_command_line_syntax;
@@ -27,6 +29,8 @@ int main(int argc, char *argv[])
    "Device name (regex)")
   ("connect,c", boost::program_options::value(&UUIDs), "UUID (regex)")
   ("hid", "Connect to Human Interface Device Service")
+    ("brltty-conf", boost::program_options::value(&BRLTTYConf),
+   "Write Bluertooth address to BRLTTY config file")
   ;
 
   positional_options_description PositionalDesc;
@@ -99,11 +103,10 @@ int main(int argc, char *argv[])
             Bluetooth.pair(Device);
             std::clog << "Paired successfully with "
                       << Device->name() << std::endl;
+            Bluetooth.trust(Device);
           } catch (BlueZ::Error &E) {
             std::cerr << "Failed to pair with " << Device->name()
                       << ": " << E.what() << std::endl;
-            Bluetooth.forgetDevice(Device);
-            std::clog << "Forgot device " << Device->name() << std::endl;
           }
         }
       } else if (!Bluetooth.isDiscovering()) {
@@ -129,8 +132,8 @@ int main(int argc, char *argv[])
       try {
         Device->connectProfile(UUID);
       } catch (BlueZ::Error &E) {
-        std::cerr << "Failed to connect to " << UUID << ": "
-                  << E.what() << std::endl;
+        std::cerr << "Failed to connect to " << UUID << ": " << E.what()
+                  << std::endl;
         return EXIT_FAILURE;
       }
     }
@@ -147,6 +150,20 @@ int main(int argc, char *argv[])
                 << std::endl;
     }
 
+    if (UsableDevices.size() == 1 && !BRLTTYConf.empty()) {
+      auto Device = UsableDevices.front();
+      std::ofstream File(BRLTTYConf);
+      if (File.good()) {
+        File << "braille-device\t"
+             << "usb:,bluetooth:" << Device->address()
+             << std::endl;
+        std::cout << "Wrote " << BRLTTYConf << std::endl;
+      } else {
+        std::cerr << "Failed to open " << BRLTTYConf << " for writing"
+                  << std::endl;
+        return EXIT_FAILURE;
+      }
+    }
     return EXIT_SUCCESS;
   }
 
@@ -227,19 +244,19 @@ namespace BlueZ {
       DBus::PendingCall PendingCall;
 
       {
-	auto RegisterAgent = BlueZ::newMethodCall
-	  (path().c_str(), Interface, "RegisterAgent");
+        auto RegisterAgent = BlueZ::newMethodCall
+          (path().c_str(), Interface, "RegisterAgent");
 
-	if (dbus_message_append_args
-	    (RegisterAgent,
-	     DBUS_TYPE_OBJECT_PATH, &AgentPath,
-	     DBUS_TYPE_STRING, &Capabilities,
-	     DBUS_TYPE_INVALID) == FALSE) {
-	  throw std::runtime_error
-	    ("Failed to append arguments to RegisterAgent message");
-	}
+        if (dbus_message_append_args
+            (RegisterAgent,
+             DBUS_TYPE_OBJECT_PATH, &AgentPath,
+             DBUS_TYPE_STRING, &Capabilities,
+             DBUS_TYPE_INVALID) == FALSE) {
+          throw std::runtime_error
+            ("Failed to append arguments to RegisterAgent message");
+        }
 
-	PendingCall.send(Bluepairy->SystemBus, std::move(RegisterAgent));
+        PendingCall.send(Bluepairy->SystemBus, std::move(RegisterAgent));
       }
 
       dbus_message_unref(PendingCall.get());
@@ -258,6 +275,7 @@ namespace BlueZ {
   constexpr char const * const Device::Property::Connected;
   constexpr char const * const Device::Property::Name;
   constexpr char const * const Device::Property::Paired;
+  constexpr char const * const Device::Property::Trusted;
 } // namespace BlueZ
 
 namespace DBus {
@@ -474,7 +492,7 @@ void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}
   }
 }
 
-void BlueZ::Adapter::isPowered(bool Value)
+void BlueZ::Adapter::power(bool Value)
 {
   auto Set = BlueZ::newMethodCall
     (path().c_str(), DBus::Properties::Interface, "Set");
@@ -503,8 +521,8 @@ void BlueZ::Adapter::startDiscovery() const
   DBus::PendingCall PendingCall;
 
   PendingCall.send(Bluepairy->SystemBus,
-		   BlueZ::newMethodCall
-		   (path().c_str(), Interface, "StartDiscovery"));
+                   BlueZ::newMethodCall
+                   (path().c_str(), Interface, "StartDiscovery"));
   dbus_message_unref(PendingCall.get());
 }
 
@@ -565,6 +583,12 @@ void BlueZ::Device::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}.
             dbus_message_iter_get_basic(&Value, &BoolValue);
             Paired = BoolValue == TRUE;
           }
+        } else if (strcmp(Property::Trusted, PropertyName) == 0) {
+          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
+            dbus_bool_t BoolValue;
+            dbus_message_iter_get_basic(&Value, &BoolValue);
+            Trusted = BoolValue == TRUE;
+          }
         } else if (strcmp(Property::Connected, PropertyName) == 0) {
           if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
             dbus_bool_t BoolValue;
@@ -602,6 +626,30 @@ void BlueZ::Device::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}.
     }
     dbus_message_iter_next(Properties);
   }
+}
+
+void BlueZ::Device::trust(bool Value)
+{
+  auto Set = BlueZ::newMethodCall
+    (path().c_str(), DBus::Properties::Interface, "Set");
+
+  {
+    DBusMessageIter Args;
+
+    dbus_message_iter_init_append(Set, &Args);
+    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Interface);
+    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Property::Trusted);
+
+    DBusMessageIter Variant;
+    dbus_bool_t BoolValue = Value? TRUE : FALSE;
+    dbus_message_iter_open_container(&Args, DBUS_TYPE_VARIANT, "b", &Variant);
+    dbus_message_iter_append_basic(&Variant, DBUS_TYPE_BOOLEAN, &BoolValue);
+    dbus_message_iter_close_container(&Args, &Variant);
+  }
+
+  DBus::PendingCall PendingCall;
+  PendingCall.send(Bluepairy->SystemBus, std::move(Set));
+  dbus_message_unref(PendingCall.get());
 }
 
 DBus::PendingCall BlueZ::Device::pair() const
@@ -907,7 +955,7 @@ void Bluepairy::powerUpAllAdapters() {
   for (auto Adapter: Adapters) {
     if (!Adapter->isPowered()) {
       std::clog << "Powering up adapter " << Adapter->name() << std::endl;
-      Adapter->isPowered(true);
+      Adapter->power(true);
       auto StartTime = std::chrono::steady_clock::now();
       do {
         readWrite();
@@ -951,7 +999,7 @@ bool Bluepairy::startDiscovery() {
   return Started;
 }
 
-void Bluepairy::forgetDevice(std::shared_ptr<BlueZ::Device> Device)
+void Bluepairy::forget(std::shared_ptr<BlueZ::Device> Device)
 {
   Device->adapter()->removeDevice(Device.get());
   while (Device->exists()) {
@@ -973,4 +1021,15 @@ void Bluepairy::pair(std::shared_ptr<BlueZ::Device> Device)
   dbus_error_init(&Error);
   dbus_set_error_from_message(&Error, Reply);
   throwIfErrorIsSet(Error);
+}
+
+void Bluepairy::trust(std::shared_ptr<BlueZ::Device> Device)
+{
+  if (!Device->isTrusted()) {
+    Device->trust(true);
+
+    do {
+      readWrite();
+    } while (Device->exists() && !Device->isTrusted());
+  }
 }

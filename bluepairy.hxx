@@ -98,7 +98,7 @@ namespace BlueZ {
     std::string const &address() const { return Address; }
     std::string const &name() const { return Name; }
     bool isPowered() const { return Powered; }
-    void isPowered(bool);
+    void power(bool);
     bool isDiscovering() const { return Discovering; }
 
     void startDiscovery() const;
@@ -112,7 +112,7 @@ namespace BlueZ {
     std::string Address;
     bool Connected;
     std::string Name;
-    bool Paired;
+    bool Paired, Trusted;
     std::set<std::string> UUIDs;
 
   public:
@@ -123,6 +123,7 @@ namespace BlueZ {
       static constexpr char const * const Connected = "Connected";
       static constexpr char const * const Name = "Name";
       static constexpr char const * const Paired = "Paired";
+      static constexpr char const * const Trusted = "Trusted";
     };
 
     Device(std::string const &Path, ::Bluepairy *Pairy) : Object(Path, Pairy) {}
@@ -134,6 +135,8 @@ namespace BlueZ {
     std::shared_ptr<Adapter const> adapter() const { return AdapterPtr; }
     std::string const &name() const { return Name; }
     bool isPaired() const { return Paired; }
+    bool isTrusted() const { return Trusted; }
+    void trust(bool);
     bool isConnected() const { return Connected; }
     std::set<std::string> const &profiles() const { return UUIDs; }
 
@@ -185,7 +188,8 @@ public:
   void readWrite();
     
   bool nameMatches(std::shared_ptr<BlueZ::Device> Device) const {
-    return regex_search(Device->name(), Pattern, std::regex_constants::match_not_null);
+    return regex_search(Device->name(), Pattern,
+                        std::regex_constants::match_not_null);
   }
   bool hasExpectedProfiles(std::shared_ptr<BlueZ::Device> Device) const {
     std::vector<std::string> intersection;
@@ -237,8 +241,9 @@ public:
   bool isDiscovering() const;
   bool startDiscovery();
 
-  void forgetDevice(decltype(Devices)::value_type);
+  void forget(decltype(Devices)::value_type);
   void pair(decltype(Devices)::value_type);
+  void trust(decltype(Devices)::value_type);
 };
 
 #endif // BLUEPAIRY_HPP
