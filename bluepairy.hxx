@@ -10,6 +10,27 @@
 
 #include <dbus/dbus.h>
 
+namespace DBus {
+  class PendingCall {
+    DBusPendingCall *Pending;
+
+  public:
+    PendingCall() : Pending(nullptr) {}
+    PendingCall(PendingCall const &);
+    PendingCall(PendingCall &&);
+    PendingCall &operator=(PendingCall const &);
+    PendingCall &operator=(PendingCall &&);
+    ~PendingCall();
+
+    void send(DBusConnection *, DBusMessage *&&);
+    void block() const { dbus_pending_call_block(Pending); }
+    bool ready() const {
+      return dbus_pending_call_get_completed(Pending) == TRUE;
+    }
+    DBusMessage *get() const;
+  };
+}
+
 class Bluepairy;
 
 namespace BlueZ {
@@ -116,7 +137,7 @@ namespace BlueZ {
     bool isConnected() const { return Connected; }
     std::set<std::string> const &profiles() const { return UUIDs; }
 
-    void pair() const;
+    DBus::PendingCall pair() const;
 
     void connectProfile(std::string) const;
   };
@@ -127,8 +148,14 @@ class Bluepairy final {
 
   std::regex Pattern;
   std::vector<std::string> ExpectedUUIDs;
-  DBusConnection *SystemBus;
 
+  DBusConnection *SystemBus;
+  DBusPreallocatedSend *Send;
+  void send(DBusMessage *&&Message) const {
+    dbus_connection_send_preallocated(SystemBus, Send, Message, nullptr);
+    dbus_message_unref(Message);
+  }
+  
   std::vector<std::shared_ptr<BlueZ::Adapter>> Adapters;
   decltype(Adapters)::value_type getAdapter(char const *Path);
   void removeAdapter(char const *Path);
@@ -150,6 +177,7 @@ public:
   Bluepairy &operator= (Bluepairy &&) = delete;
   Bluepairy &operator= (Bluepairy const &) = delete;
   ~Bluepairy() {
+    dbus_connection_free_preallocated_send(SystemBus, Send);
     dbus_connection_close(SystemBus);
     dbus_connection_unref(SystemBus);
   }
@@ -210,6 +238,7 @@ public:
   bool startDiscovery();
 
   void forgetDevice(decltype(Devices)::value_type);
+  void pair(decltype(Devices)::value_type);
 };
 
 #endif // BLUEPAIRY_HPP

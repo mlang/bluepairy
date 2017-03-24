@@ -96,8 +96,7 @@ int main(int argc, char *argv[])
         for (auto Device: PairableDevices) {
           std::clog << "Trying to pair with " << Device->name() << std::endl;
           try {
-            Device->pair();
-            do { Bluetooth.readWrite(); } while (!Device->isPaired());
+            Bluetooth.pair(Device);
             std::clog << "Paired successfully with "
                       << Device->name() << std::endl;
           } catch (BlueZ::Error &E) {
@@ -199,7 +198,20 @@ namespace {
 } // namespace
 
 namespace BlueZ {
-  constexpr char const * const Service = "org.bluez";
+  static constexpr char const * const Service = "org.bluez";
+
+  inline DBusMessage *newMethodCall
+  (char const *Path, char const *Interface, char const *Method)
+  {
+    auto Message = dbus_message_new_method_call
+      (Service, Path, Interface, Method);
+
+    if (Message == nullptr) {
+      throw std::bad_alloc();
+    }
+
+    return Message;
+  }
 
   struct Agent {
     static constexpr char const * const Interface = "org.bluez.Agent1";
@@ -210,13 +222,10 @@ namespace BlueZ {
 
     explicit AgentManager(::Bluepairy *Pairy) : Object("/org/bluez", Pairy) {}
 
-    void registerAgent(char const *AgentPath, char const *Capabilities) const {
-      DBusMessage *RegisterAgent = dbus_message_new_method_call
-        (Service, path().c_str(), Interface, "RegisterAgent");
-
-      if (RegisterAgent == nullptr) {
-        throw std::bad_alloc();
-      }
+    void registerAgent(char const *AgentPath, char const *Capabilities) const
+    {
+      auto RegisterAgent = BlueZ::newMethodCall
+        (path().c_str(), Interface, "RegisterAgent");
 
       if (dbus_message_append_args
           (RegisterAgent,
@@ -227,19 +236,9 @@ namespace BlueZ {
           ("Failed to append arguments to RegisterAgent message");
       }
 
-      DBusError Error;
-      dbus_error_init(&Error);
-      DBusMessage *Reply = dbus_connection_send_with_reply_and_block
-        (Bluepairy->SystemBus, RegisterAgent, -1, &Error);
-      dbus_message_unref(RegisterAgent);
-      throwIfErrorIsSet(Error);
-      if (Reply == nullptr) {
-        throw std::bad_alloc();
-      }
-
-      dbus_set_error_from_message(&Error, Reply);
-      dbus_message_unref(Reply);
-      throwIfErrorIsSet(Error);
+      DBus::PendingCall PendingCall;
+      PendingCall.send(Bluepairy->SystemBus, std::move(RegisterAgent));
+      dbus_message_unref(PendingCall.get());
     }
   };
 
@@ -258,13 +257,88 @@ namespace BlueZ {
 } // namespace BlueZ
 
 namespace DBus {
-  namespace interface {
-    constexpr char const * const ObjectManager =
+  struct ObjectManager {
+    static constexpr char const * const Interface =
       "org.freedesktop.DBus.ObjectManager";
-    constexpr char const * const Properties =
+  };
+  struct Properties {
+    static constexpr char const * const Interface =
       "org.freedesktop.DBus.Properties";
-  }
+  };
+  constexpr char const * const ObjectManager::Interface;
+  constexpr char const * const Properties::Interface;
 } // namespace DBus
+
+DBus::PendingCall::PendingCall(PendingCall const &Other)
+: Pending(Other.Pending)
+{
+  if (Pending) {
+    dbus_pending_call_ref(Pending);
+  }
+}
+
+DBus::PendingCall::PendingCall(PendingCall &&Other)
+: Pending(Other.Pending)
+{
+  Other.Pending = nullptr;
+}
+
+DBus::PendingCall &DBus::PendingCall::operator=(PendingCall const &Other)
+{
+  if (Pending) {
+    dbus_pending_call_unref(Pending);
+  }
+
+  if ((Pending = Other.Pending) != nullptr) {
+    dbus_pending_call_ref(Pending);
+  }
+}
+
+DBus::PendingCall &DBus::PendingCall::operator=(PendingCall &&Other)
+{
+  if (Pending) {
+    dbus_pending_call_unref(Pending);
+  }
+  Pending = Other.Pending;
+  Other.Pending = nullptr;
+}
+
+void DBus::PendingCall::send(DBusConnection *Bus, DBusMessage *&&Message)
+{
+  if (dbus_connection_send_with_reply(Bus, Message, &Pending, -1) == FALSE) {
+    throw std::runtime_error("Failed to send message");
+  }
+
+  dbus_message_unref(Message);
+}
+
+DBusMessage *DBus::PendingCall::get() const
+{
+  if (!ready()) block();
+
+  auto Reply = dbus_pending_call_steal_reply(Pending);
+
+  if (Reply == nullptr) {
+    throw std::runtime_error
+      ("DBus method call reply was null");
+  }
+
+  DBusError Error;
+  dbus_error_init(&Error);
+  if (dbus_set_error_from_message(&Error, Reply) == TRUE) {
+    dbus_message_unref(Reply);
+    throwIfErrorIsSet(Error);
+  }
+
+  return Reply;
+}
+
+DBus::PendingCall::~PendingCall()
+{
+  if (Pending) {
+    dbus_pending_call_unref(Pending);
+  }
+}
 
 constexpr char const * const Bluepairy::AgentPath;
 
@@ -272,7 +346,7 @@ Bluepairy::Bluepairy
 ( std::string const &Pattern, std::vector<std::string> UUIDs )
 : Pattern(Pattern)
 , ExpectedUUIDs(std::move(UUIDs))
-, SystemBus([] {
+, SystemBus([]{
     DBusError Error;
     dbus_error_init(&Error);
 
@@ -284,6 +358,14 @@ Bluepairy::Bluepairy
     }
 
     return Bus;
+  }())
+, Send([this]{
+    auto PreallocatedSend = dbus_connection_preallocate_send(SystemBus);
+    if (PreallocatedSend == nullptr) {
+      throw std::bad_alloc();
+    }
+
+    return PreallocatedSend;
   }())
 {
   sort(begin(ExpectedUUIDs), end(ExpectedUUIDs));
@@ -297,36 +379,36 @@ Bluepairy::Bluepairy
   readWrite();
 
   { // Get managed objects
-    DBusMessage *GetManagedObjects = dbus_message_new_method_call
-      (BlueZ::Service, "/", DBus::interface::ObjectManager, "GetManagedObjects");
-    if (!GetManagedObjects) throw std::bad_alloc();
+    DBus::PendingCall PendingCall;
 
-    DBusMessage *ManagedObjects = dbus_connection_send_with_reply_and_block
-      (SystemBus, GetManagedObjects, -1, &Error);
-    dbus_message_unref(GetManagedObjects);
-    throwIfErrorIsSet(Error);
-    if (!ManagedObjects) throw std::bad_alloc();
-    dbus_set_error_from_message(&Error, ManagedObjects);
-    throwIfErrorIsSet(Error);
+    PendingCall.send(SystemBus,
+                     BlueZ::newMethodCall
+                     ("/",
+                      DBus::ObjectManager::Interface, "GetManagedObjects"));
+    auto ManagedObjects = PendingCall.get();
 
     DBusMessageIter Args;
     if (!dbus_message_iter_init(ManagedObjects, &Args)) {
+      dbus_message_unref(ManagedObjects);
       throw std::runtime_error("GetManagedObjects reply was empty");
     }
 
-    if (DBUS_TYPE_ARRAY == dbus_message_iter_get_arg_type(&Args)) {
-      DBusMessageIter Objects;
+    if (DBUS_TYPE_ARRAY != dbus_message_iter_get_arg_type(&Args)) {
+      dbus_message_unref(ManagedObjects);
+      throw std::runtime_error
+        ("Expected an array as first argument of GetManagedObjects reply");
+    }
 
-      dbus_message_iter_recurse(&Args, &Objects);
-      while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(&Objects)) {
-        DBusMessageIter Object;
+    DBusMessageIter Objects;
+
+    dbus_message_iter_recurse(&Args, &Objects);
+    while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(&Objects)) {
+      DBusMessageIter Object;
         
-        dbus_message_iter_recurse(&Objects, &Object);
-        updateObjectProperties(&Object);
+      dbus_message_iter_recurse(&Objects, &Object);
+      updateObjectProperties(&Object);
 
-        dbus_message_iter_next(&Objects);
-      }
-      assert(dbus_message_iter_has_next(&Args) == FALSE);
+      dbus_message_iter_next(&Objects);
     }
     dbus_message_unref(ManagedObjects);
   }
@@ -354,30 +436,30 @@ void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}
       dbus_message_iter_get_basic(&Property, &PropertyName);
       dbus_message_iter_next(&Property);
       if (DBUS_TYPE_VARIANT == dbus_message_iter_get_arg_type(&Property)) {
-        DBusMessageIter Value;
-        dbus_message_iter_recurse(&Property, &Value);
+        DBusMessageIter Variant;
+        dbus_message_iter_recurse(&Property, &Variant);
         if (strcmp(Property::Powered, PropertyName) == 0) {
-          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
+          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Variant)) {
             dbus_bool_t BoolValue;
-            dbus_message_iter_get_basic(&Value, &BoolValue);
+            dbus_message_iter_get_basic(&Variant, &BoolValue);
             Powered = BoolValue == TRUE;
           }
         } else if (strcmp(Property::Discovering, PropertyName) == 0) {
-          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Value)) {
+          if (DBUS_TYPE_BOOLEAN == dbus_message_iter_get_arg_type(&Variant)) {
             dbus_bool_t BoolValue;
-            dbus_message_iter_get_basic(&Value, &BoolValue);
+            dbus_message_iter_get_basic(&Variant, &BoolValue);
             Discovering = BoolValue == TRUE;
           }
         } else if (strcmp(Property::Address, PropertyName) == 0) {
-          if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Value)) {
+          if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Variant)) {
             char const *StringValue;
-            dbus_message_iter_get_basic(&Value, &StringValue);
+            dbus_message_iter_get_basic(&Variant, &StringValue);
             Address = StringValue;
           }
         } else if (strcmp(Property::Name, PropertyName) == 0) {
-          if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Value)) {
+          if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Variant)) {
             char const *StringValue;
-            dbus_message_iter_get_basic(&Value, &StringValue);
+            dbus_message_iter_get_basic(&Variant, &StringValue);
             Name = StringValue;
           }
         }
@@ -390,9 +472,8 @@ void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}
 
 void BlueZ::Adapter::isPowered(bool Value)
 {
-  DBusMessage *Set = dbus_message_new_method_call
-    (Service, path().c_str(), DBus::interface::Properties, "Set");
-  if (!Set) throw std::bad_alloc();
+  auto Set = BlueZ::newMethodCall
+    (path().c_str(), DBus::Properties::Interface, "Set");
 
   {
     DBusMessageIter Args;
@@ -408,60 +489,38 @@ void BlueZ::Adapter::isPowered(bool Value)
     dbus_message_iter_close_container(&Args, &Variant);
   }
 
-  DBusError Error;
-  dbus_error_init(&Error);
-  DBusMessage *Reply = dbus_connection_send_with_reply_and_block
-    (Bluepairy->SystemBus, Set, -1, &Error);
-  dbus_message_unref(Set);
-  throwIfErrorIsSet(Error);
-  if (!Reply) throw std::bad_alloc();
-  dbus_set_error_from_message(&Error, Reply);
-  throwIfErrorIsSet(Error);
-  dbus_message_unref(Reply);
+  DBus::PendingCall PendingCall;
+  PendingCall.send(Bluepairy->SystemBus, std::move(Set));
+  dbus_message_unref(PendingCall.get());
 }
 
 void BlueZ::Adapter::startDiscovery() const
 {
-  DBusMessage *StartDiscovery = dbus_message_new_method_call
-    (Service, path().c_str(), Interface, "StartDiscovery");
-  if (!StartDiscovery) throw std::bad_alloc();
+  DBus::PendingCall PendingCall;
 
-  DBusError Error;
-  dbus_error_init(&Error);
-  DBusMessage *Reply = dbus_connection_send_with_reply_and_block
-    (Bluepairy->SystemBus, StartDiscovery, -1, &Error);
-  dbus_message_unref(StartDiscovery);
-  throwIfErrorIsSet(Error);
-  if (!Reply) throw std::bad_alloc();
-  dbus_set_error_from_message(&Error, Reply);
-  dbus_message_unref(Reply);
-  throwIfErrorIsSet(Error);
+  PendingCall.send(Bluepairy->SystemBus,
+		   BlueZ::newMethodCall
+		   (path().c_str(), Interface, "StartDiscovery"));
+  dbus_message_unref(PendingCall.get());
 }
 
 void BlueZ::Adapter::removeDevice(BlueZ::Device const *Device) const
 {
-  DBusMessage *RemoveDevice = dbus_message_new_method_call
-    (Service, path().c_str(), Interface, "RemoveDevice");
-  if (RemoveDevice == nullptr) {
-    throw std::bad_alloc();
-  }
+  auto RemoveDevice = BlueZ::newMethodCall
+    (path().c_str(), Interface, "RemoveDevice");
 
   char const * const Path = Device->path().c_str();
   if (dbus_message_append_args
-      (RemoveDevice, DBUS_TYPE_OBJECT_PATH, &Path, DBUS_TYPE_INVALID) == FALSE) {
+      (RemoveDevice,
+       DBUS_TYPE_OBJECT_PATH, &Path,
+       DBUS_TYPE_INVALID) == FALSE) {
     throw std::runtime_error
       ("Failed to append arguments to RemoveDevice message");
   }
 
-  DBusError Error;
-  dbus_error_init(&Error);
-  DBusMessage *Reply = dbus_connection_send_with_reply_and_block
-    (Bluepairy->SystemBus, RemoveDevice, -1, &Error);
-  dbus_message_unref(RemoveDevice);
-  throwIfErrorIsSet(Error);
-  dbus_set_error_from_message(&Error, Reply);
-  dbus_message_unref(Reply);
-  throwIfErrorIsSet(Error);
+  DBus::PendingCall PendingCall;
+  PendingCall.send(Bluepairy->SystemBus, std::move(RemoveDevice));
+  dbus_message_unref(PendingCall.get());
 }
 
 bool BlueZ::Device::exists() const {
@@ -541,31 +600,19 @@ void BlueZ::Device::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}.
   }
 }
 
-void BlueZ::Device::pair() const
+DBus::PendingCall BlueZ::Device::pair() const
 {
-  DBusMessage *Pair = dbus_message_new_method_call
-    (Service, path().c_str(), Interface, "Pair");
-  if (!Pair) {
-    throw std::bad_alloc();
-  }
+  DBus::PendingCall Pending;
 
-  if (dbus_connection_send(Bluepairy->SystemBus, Pair, nullptr)) {
-    dbus_message_unref(Pair);
-    while (exists() && !isPaired()) {
-      Bluepairy->readWrite();
-    }
-  } else {
-    throw std::runtime_error("Failed to send message");
-  }
+  Pending.send(Bluepairy->SystemBus,
+               BlueZ::newMethodCall(path().c_str(), Interface, "Pair"));
+
+  return Pending;
 }
 
 void BlueZ::Device::connectProfile(std::string UUID) const {
-  DBusMessage *ConnectProfile = dbus_message_new_method_call
-    (Service, path().c_str(), Interface, "ConnectProfile");
-
-  if (ConnectProfile == nullptr) {
-    throw std::bad_alloc();
-  }
+  auto ConnectProfile = BlueZ::newMethodCall
+    (path().c_str(), Interface, "ConnectProfile");
 
   char const * const Profile = UUID.c_str();
   if (dbus_message_append_args
@@ -576,19 +623,9 @@ void BlueZ::Device::connectProfile(std::string UUID) const {
       ("Failed to append arguments to ConnectProfile message");
   };
 
-  DBusError Error;
-  dbus_error_init(&Error);
-  DBusMessage *Reply = dbus_connection_send_with_reply_and_block
-    (Bluepairy->SystemBus, ConnectProfile, -1, &Error);
-  dbus_message_unref(ConnectProfile);
-  throwIfErrorIsSet(Error);
-  if (Reply == nullptr) {
-    throw std::bad_alloc();
-  }
-
-  dbus_set_error_from_message(&Error, Reply);
-  dbus_message_unref(Reply);
-  throwIfErrorIsSet(Error);
+  DBus::PendingCall PendingCall;
+  PendingCall.send(Bluepairy->SystemBus, std::move(ConnectProfile));
+  dbus_message_unref(PendingCall.get());
 }
 
 std::shared_ptr<BlueZ::Adapter> Bluepairy::getAdapter(char const *Path)
@@ -726,9 +763,7 @@ void Bluepairy::readWrite()
             if (Reply != nullptr) {
               char const * const PIN = guessPIN(Device).c_str();
               dbus_message_append_args(Reply, DBUS_TYPE_STRING, &PIN, DBUS_TYPE_INVALID);
-              dbus_connection_send(SystemBus, Reply, nullptr);
-              dbus_message_unref(Reply);
-              dbus_connection_flush(SystemBus);
+              send(std::move(Reply));
               std::clog << "RequestPinCode for " << Device->name()
                         << " answered with " << PIN << std::endl;
             }
@@ -749,14 +784,14 @@ void Bluepairy::readWrite()
               ("Failed to get arguments of RequestConfirmation message");
           }
           throwIfErrorIsSet(Error);
-          // A void reply indicates that we confirm.
-          DBusMessage *Reply = dbus_message_new_method_return(Incoming);
-          if (Reply == nullptr) {
-            throw std::bad_alloc();
+          
+          { // A void reply indicates that we confirm.
+            DBusMessage *Reply = dbus_message_new_method_return(Incoming);
+            if (Reply == nullptr) {
+              throw std::bad_alloc();
+            }
+            send(std::move(Reply));
           }
-          dbus_connection_send(SystemBus, Reply, nullptr);
-          dbus_message_unref(Reply);
-          dbus_connection_flush(SystemBus);
           std::clog << "RequestConfirmation confirmed" << std::endl;
         }
       }
@@ -768,7 +803,7 @@ void Bluepairy::readWrite()
       break;
     case DBUS_MESSAGE_TYPE_SIGNAL:
       if (dbus_message_is_signal
-          (Incoming, DBus::interface::Properties, "PropertiesChanged")
+          (Incoming, DBus::Properties::Interface, "PropertiesChanged")
           == TRUE) {
         DBusMessageIter Args;
 
@@ -790,7 +825,7 @@ void Bluepairy::readWrite()
             }
           }
         }
-      } else if (dbus_message_has_interface(Incoming, DBus::interface::ObjectManager) == TRUE) {
+      } else if (dbus_message_has_interface(Incoming, DBus::ObjectManager::Interface) == TRUE) {
         if (dbus_message_has_member(Incoming, "InterfacesAdded") == TRUE) {
           DBusMessageIter Args;
           dbus_message_iter_init(Incoming, &Args);
@@ -912,9 +947,26 @@ bool Bluepairy::startDiscovery() {
   return Started;
 }
 
-void Bluepairy::forgetDevice(std::shared_ptr<BlueZ::Device> Device) {
+void Bluepairy::forgetDevice(std::shared_ptr<BlueZ::Device> Device)
+{
   Device->adapter()->removeDevice(Device.get());
   while (Device->exists()) {
     readWrite();
   }
+}
+
+void Bluepairy::pair(std::shared_ptr<BlueZ::Device> Device)
+{
+  auto Future = Device->pair();
+
+  do {
+    readWrite();
+  } while (!Future.ready());
+
+  auto Reply = Future.get();
+
+  DBusError Error;
+  dbus_error_init(&Error);
+  dbus_set_error_from_message(&Error, Reply);
+  throwIfErrorIsSet(Error);
 }
