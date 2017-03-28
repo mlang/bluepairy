@@ -93,7 +93,7 @@ namespace BlueZ {
     : Object(Path, Pairy) {}
 
     bool exists() const;
-    void onPropertiesChanged(DBusMessageIter *);
+    void onPropertiesChanged(DBusMessageIter &);
 
     std::string const &address() const { return Address; }
     std::string const &name() const { return Name; }
@@ -129,7 +129,7 @@ namespace BlueZ {
     Device(std::string const &Path, ::Bluepairy *Pairy) : Object(Path, Pairy) {}
     bool exists() const;
 
-    void onPropertiesChanged(DBusMessageIter *);
+    void onPropertiesChanged(DBusMessageIter &);
 
     std::string const &address() const { return Address; }
     std::shared_ptr<Adapter const> adapter() const { return AdapterPtr; }

@@ -214,6 +214,17 @@ namespace {
   }
 } // namespace
 
+namespace DBus {
+  struct ObjectManager {
+    static constexpr char const * const Interface = "org.freedesktop.DBus.ObjectManager";
+  };
+   struct Properties {
+     static constexpr char const * const Interface = "org.freedesktop.DBus.Properties";
+   };
+   constexpr char const * const ObjectManager::Interface;
+   constexpr char const * const Properties::Interface;
+} // namespace DBus
+
 namespace BlueZ {
   static constexpr char const * const Service = "org.bluez";
 
@@ -228,6 +239,24 @@ namespace BlueZ {
     }
 
     return Message;
+  }
+
+  DBusMessage *set(char const *Path, char const *Interface, char const *Property, bool Value)
+  {
+    auto Set = BlueZ::newMethodCall(Path, DBus::Properties::Interface, "Set");
+    DBusMessageIter Args;
+
+    dbus_message_iter_init_append(Set, &Args);
+    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Interface);
+    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Property);
+
+    DBusMessageIter Variant;
+    dbus_bool_t BoolValue = Value? TRUE : FALSE;
+    dbus_message_iter_open_container(&Args, DBUS_TYPE_VARIANT, "b", &Variant);
+    dbus_message_iter_append_basic(&Variant, DBUS_TYPE_BOOLEAN, &BoolValue);
+    dbus_message_iter_close_container(&Args, &Variant);
+
+    return Set;
   }
 
   struct Agent {
@@ -277,19 +306,6 @@ namespace BlueZ {
   constexpr char const * const Device::Property::Paired;
   constexpr char const * const Device::Property::Trusted;
 } // namespace BlueZ
-
-namespace DBus {
-  struct ObjectManager {
-    static constexpr char const * const Interface =
-      "org.freedesktop.DBus.ObjectManager";
-  };
-  struct Properties {
-    static constexpr char const * const Interface =
-      "org.freedesktop.DBus.Properties";
-  };
-  constexpr char const * const ObjectManager::Interface;
-  constexpr char const * const Properties::Interface;
-} // namespace DBus
 
 DBus::PendingCall::PendingCall(PendingCall const &Other)
 : Pending(Other.Pending)
@@ -447,11 +463,11 @@ bool BlueZ::Adapter::exists() const {
   return false;
 }
 
-void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}... */)
+void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter &Properties /* {sa{sv}}... */)
 {
-  while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(Properties)) {
+  while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(&Properties)) {
     DBusMessageIter Property;
-    dbus_message_iter_recurse(Properties, &Property);
+    dbus_message_iter_recurse(&Properties, &Property);
     if (DBUS_TYPE_STRING ==
         dbus_message_iter_get_arg_type(&Property)) {
       char const *PropertyName;
@@ -488,31 +504,16 @@ void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}
         assert(!dbus_message_iter_has_next(&Property));
       }
     }
-    dbus_message_iter_next(Properties);
+    dbus_message_iter_next(&Properties);
   }
 }
 
 void BlueZ::Adapter::power(bool Value)
 {
-  auto Set = BlueZ::newMethodCall
-    (path().c_str(), DBus::Properties::Interface, "Set");
-
-  {
-    DBusMessageIter Args;
-
-    dbus_message_iter_init_append(Set, &Args);
-    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Interface);
-    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Property::Powered);
-
-    DBusMessageIter Variant;
-    dbus_bool_t BoolValue = Value? TRUE : FALSE;
-    dbus_message_iter_open_container(&Args, DBUS_TYPE_VARIANT, "b", &Variant);
-    dbus_message_iter_append_basic(&Variant, DBUS_TYPE_BOOLEAN, &BoolValue);
-    dbus_message_iter_close_container(&Args, &Variant);
-  }
-
   DBus::PendingCall PendingCall;
-  PendingCall.send(Bluepairy->SystemBus, std::move(Set));
+
+  PendingCall.send(Bluepairy->SystemBus,
+                   BlueZ::set(path().c_str(), Interface, Property::Powered, Value));
   dbus_message_unref(PendingCall.get());
 }
 
@@ -545,7 +546,8 @@ void BlueZ::Adapter::removeDevice(BlueZ::Device const *Device) const
   dbus_message_unref(PendingCall.get());
 }
 
-bool BlueZ::Device::exists() const {
+bool BlueZ::Device::exists() const
+{
   for (auto Device: Bluepairy->Devices) {
     if (Device.get() == this) return true;
   }
@@ -553,11 +555,11 @@ bool BlueZ::Device::exists() const {
   return false;
 }
 
-void BlueZ::Device::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}... */)
+void BlueZ::Device::onPropertiesChanged(DBusMessageIter &Properties /* {sa{sv}}... */)
 {
-  while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(Properties)) {
+  while (DBUS_TYPE_DICT_ENTRY == dbus_message_iter_get_arg_type(&Properties)) {
     DBusMessageIter Property;
-    dbus_message_iter_recurse(Properties, &Property);
+    dbus_message_iter_recurse(&Properties, &Property);
     if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&Property)) {
       char const *PropertyName;
       dbus_message_iter_get_basic(&Property, &PropertyName);
@@ -624,31 +626,16 @@ void BlueZ::Device::onPropertiesChanged(DBusMessageIter *Properties /* {sa{sv}}.
         assert(!dbus_message_iter_has_next(&Property));
       }
     }
-    dbus_message_iter_next(Properties);
+    dbus_message_iter_next(&Properties);
   }
 }
 
 void BlueZ::Device::trust(bool Value)
 {
-  auto Set = BlueZ::newMethodCall
-    (path().c_str(), DBus::Properties::Interface, "Set");
-
-  {
-    DBusMessageIter Args;
-
-    dbus_message_iter_init_append(Set, &Args);
-    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Interface);
-    dbus_message_iter_append_basic(&Args, DBUS_TYPE_STRING, &Property::Trusted);
-
-    DBusMessageIter Variant;
-    dbus_bool_t BoolValue = Value? TRUE : FALSE;
-    dbus_message_iter_open_container(&Args, DBUS_TYPE_VARIANT, "b", &Variant);
-    dbus_message_iter_append_basic(&Variant, DBUS_TYPE_BOOLEAN, &BoolValue);
-    dbus_message_iter_close_container(&Args, &Variant);
-  }
-
   DBus::PendingCall PendingCall;
-  PendingCall.send(Bluepairy->SystemBus, std::move(Set));
+
+  PendingCall.send(Bluepairy->SystemBus,
+                   BlueZ::set(path().c_str(), Interface, Property::Trusted, Value));
   dbus_message_unref(PendingCall.get());
 }
 
@@ -662,7 +649,8 @@ DBus::PendingCall BlueZ::Device::pair() const
   return Pending;
 }
 
-void BlueZ::Device::connectProfile(std::string UUID) const {
+void BlueZ::Device::connectProfile(std::string UUID) const
+{
   auto ConnectProfile = BlueZ::newMethodCall
     (path().c_str(), Interface, "ConnectProfile");
 
@@ -673,7 +661,7 @@ void BlueZ::Device::connectProfile(std::string UUID) const {
        DBUS_TYPE_INVALID) == FALSE) {
     throw std::runtime_error
       ("Failed to append arguments to ConnectProfile message");
-  };
+  }
 
   DBus::PendingCall PendingCall;
   PendingCall.send(Bluepairy->SystemBus, std::move(ConnectProfile));
@@ -750,7 +738,7 @@ void Bluepairy::updateObjectProperties(DBusMessageIter *Object /* oa{sa{sv}} */)
               DBusMessageIter Properties;
 
               dbus_message_iter_recurse(&Interface, &Properties);
-              getAdapter(Path)->onPropertiesChanged(&Properties);
+              getAdapter(Path)->onPropertiesChanged(Properties);
 
               assert(dbus_message_iter_has_next(&Interface) == FALSE);
             }
@@ -760,7 +748,7 @@ void Bluepairy::updateObjectProperties(DBusMessageIter *Object /* oa{sa{sv}} */)
                 dbus_message_iter_get_arg_type(&Interface)) {
               DBusMessageIter Properties;
               dbus_message_iter_recurse(&Interface, &Properties);
-              getDevice(Path)->onPropertiesChanged(&Properties);
+              getDevice(Path)->onPropertiesChanged(Properties);
               assert(dbus_message_iter_has_next(&Interface) == FALSE);
             }
           }
@@ -871,9 +859,9 @@ void Bluepairy::readWrite()
             dbus_message_iter_recurse(&Args, &Properties);
 
             if (strcmp(BlueZ::Adapter::Interface, InterfaceName) == 0) {
-              getAdapter(Path)->onPropertiesChanged(&Properties);
+              getAdapter(Path)->onPropertiesChanged(Properties);
             } else if (strcmp(BlueZ::Device::Interface, InterfaceName) == 0) {
-              getDevice(Path)->onPropertiesChanged(&Properties);
+              getDevice(Path)->onPropertiesChanged(Properties);
             }
           }
         }
