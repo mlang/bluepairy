@@ -10,7 +10,6 @@ int main(int argc, char *argv[])
 {
   std::string FriendlyName;
   std::vector<std::string> UUIDs;
-  std::string BRLTTYConf;
 
   using command_line_parser = boost::program_options::command_line_parser;
   using invalid_command_line_syntax = boost::program_options::invalid_command_line_syntax;
@@ -29,8 +28,6 @@ int main(int argc, char *argv[])
    "Device name (regex)")
   ("connect,c", boost::program_options::value(&UUIDs), "UUID (regex)")
   ("hid", "Connect to Human Interface Device Service")
-    ("brltty-conf", boost::program_options::value(&BRLTTYConf),
-   "Write Bluertooth address to BRLTTY config file")
   ;
 
   positional_options_description PositionalDesc;
@@ -150,20 +147,6 @@ int main(int argc, char *argv[])
                 << std::endl;
     }
 
-    if (UsableDevices.size() == 1 && !BRLTTYConf.empty()) {
-      auto Device = UsableDevices.front();
-      std::ofstream File(BRLTTYConf);
-      if (File.good()) {
-        File << "braille-device\t"
-             << "usb:,bluetooth:" << Device->address()
-             << std::endl;
-        std::cout << "Wrote " << BRLTTYConf << std::endl;
-      } else {
-        std::cerr << "Failed to open " << BRLTTYConf << " for writing"
-                  << std::endl;
-        return EXIT_FAILURE;
-      }
-    }
     return EXIT_SUCCESS;
   }
 
@@ -801,8 +784,13 @@ void Bluepairy::readWrite()
             auto Device = getDevice(Path);
             DBusMessage *Reply = dbus_message_new_method_return(Incoming);
             if (Reply != nullptr) {
-              char const * const PIN = guessPIN(Device).c_str();
-              dbus_message_append_args(Reply, DBUS_TYPE_STRING, &PIN, DBUS_TYPE_INVALID);
+              auto PIN = guessPIN(Device);
+              char const * const StringValue = PIN.c_str();
+              dbus_message_append_args(
+                Reply,
+                DBUS_TYPE_STRING, &StringValue,
+                DBUS_TYPE_INVALID
+              );
               send(std::move(Reply));
               std::clog << "RequestPinCode for " << Device->name()
                         << " answered with " << PIN << std::endl;
@@ -915,7 +903,7 @@ std::string Bluepairy::guessPIN(std::shared_ptr<BlueZ::Device> Device) const
                        "|" "Active Braille AB4"
                        "|" "Active Star AS4"
                        "|" "Basic Braille BB4"
-                       "|" "Braille Star BS4"
+                       "|" "Braille Star 40 BS4"
                        "|" "Braillino BL2"
                        ")"
                        "/" "[[:upper:]][[:digit:]]"
@@ -928,8 +916,8 @@ std::string Bluepairy::guessPIN(std::shared_ptr<BlueZ::Device> Device) const
       std::stringstream PINCode;
 
       for (int I = 0; I < SerialNumber.size(); ++I) {
-        char Digit = ((SerialNumber[I] - '0' + I + 1) % 10) + '0';
-        PINCode << Digit;
+	char Digit = ((SerialNumber[I] - '0' + I + 1) % 10) + '0';
+	PINCode << Digit;
       }
 
       return PINCode.str();

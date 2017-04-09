@@ -1,7 +1,6 @@
 [Unit]
-Requires=bluetooth.target
-After=bluetooth.target
-Before=brltty.service
+Requires=bluetooth.service
+After=bluetooth.service
 
 [Service]
 Type=oneshot
@@ -9,4 +8,4 @@ RemainAfterExit=yes
 ExecStart=/usr/local/sbin/bluepairy --hid 'Active Star AS4'
 
 [Install]
-WantedBy=brltty.service
+WantedBy=bluetooth.target
