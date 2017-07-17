@@ -1,5 +1,4 @@
 #include <chrono>
-#include <fstream>
 #include <iostream>
 
 #include <boost/program_options.hpp>
@@ -201,21 +200,22 @@ namespace DBus {
   struct ObjectManager {
     static constexpr char const * const Interface = "org.freedesktop.DBus.ObjectManager";
   };
-   struct Properties {
-     static constexpr char const * const Interface = "org.freedesktop.DBus.Properties";
-   };
-   constexpr char const * const ObjectManager::Interface;
-   constexpr char const * const Properties::Interface;
+  struct Properties {
+    static constexpr char const * const Interface = "org.freedesktop.DBus.Properties";
+  };
+  constexpr char const * const ObjectManager::Interface;
+  constexpr char const * const Properties::Interface;
 } // namespace DBus
 
 namespace BlueZ {
   static constexpr char const * const Service = "org.bluez";
 
-  inline DBusMessage *newMethodCall
-  (char const *Path, char const *Interface, char const *Method)
+  inline DBusMessage *
+  newMethodCall(std::string Path, char const *Interface, char const *Method)
   {
-    auto Message = dbus_message_new_method_call
-      (Service, Path, Interface, Method);
+    auto Message = dbus_message_new_method_call (
+      Service, Path.c_str(), Interface, Method
+    );
 
     if (Message == nullptr) {
       throw std::bad_alloc();
@@ -224,9 +224,11 @@ namespace BlueZ {
     return Message;
   }
 
-  DBusMessage *set(char const *Path, char const *Interface, char const *Property, bool Value)
+  DBusMessage *set(std::string Path, char const *Interface, char const *Property, bool Value)
   {
-    auto Set = BlueZ::newMethodCall(Path, DBus::Properties::Interface, "Set");
+    auto Set = BlueZ::newMethodCall (
+      std::move(Path), DBus::Properties::Interface, "Set"
+    );
     DBusMessageIter Args;
 
     dbus_message_iter_init_append(Set, &Args);
@@ -256,8 +258,7 @@ namespace BlueZ {
       DBus::PendingCall PendingCall;
 
       {
-        auto RegisterAgent = BlueZ::newMethodCall
-          (path().c_str(), Interface, "RegisterAgent");
+        auto RegisterAgent = BlueZ::newMethodCall(path(), Interface, "RegisterAgent");
 
         if (dbus_message_append_args
             (RegisterAgent,
@@ -331,6 +332,16 @@ void DBus::PendingCall::send(DBusConnection *Bus, DBusMessage *&&Message)
   }
 
   dbus_message_unref(Message);
+}
+
+void DBus::PendingCall::block() const
+{
+  dbus_pending_call_block(Pending);
+}
+
+bool DBus::PendingCall::ready() const
+{
+  return dbus_pending_call_get_completed(Pending) == TRUE;
 }
 
 DBusMessage *DBus::PendingCall::get() const
@@ -438,12 +449,19 @@ Bluepairy::Bluepairy
   AgentManager.registerAgent(AgentPath, "DisplayYesNo");
 }
 
-bool BlueZ::Adapter::exists() const {
-  for (auto Adapter: Bluepairy->Adapters) {
-    if (Adapter.get() == this) return true;
-  }
+Bluepairy::~Bluepairy()
+{
+  dbus_connection_free_preallocated_send(SystemBus, Send);
+  dbus_connection_close(SystemBus);
+  dbus_connection_unref(SystemBus);
+}
 
-  return false;
+bool BlueZ::Adapter::exists() const
+{
+  return find_if (
+	   begin(Bluepairy->Adapters), end(Bluepairy->Adapters),
+	   [this](auto Adapter) { return Adapter.get() == this; }
+         ) != end(Bluepairy->Adapters);
 }
 
 void BlueZ::Adapter::onPropertiesChanged(DBusMessageIter &Properties /* {sa{sv}}... */)
@@ -496,7 +514,7 @@ void BlueZ::Adapter::power(bool Value)
   DBus::PendingCall PendingCall;
 
   PendingCall.send(Bluepairy->SystemBus,
-                   BlueZ::set(path().c_str(), Interface, Property::Powered, Value));
+                   BlueZ::set(path(), Interface, Property::Powered, Value));
   dbus_message_unref(PendingCall.get());
 }
 
@@ -506,14 +524,14 @@ void BlueZ::Adapter::startDiscovery() const
 
   PendingCall.send(Bluepairy->SystemBus,
                    BlueZ::newMethodCall
-                   (path().c_str(), Interface, "StartDiscovery"));
+                   (path(), Interface, "StartDiscovery"));
   dbus_message_unref(PendingCall.get());
 }
 
 void BlueZ::Adapter::removeDevice(BlueZ::Device const *Device) const
 {
   auto RemoveDevice = BlueZ::newMethodCall
-    (path().c_str(), Interface, "RemoveDevice");
+    (path(), Interface, "RemoveDevice");
 
   char const * const Path = Device->path().c_str();
   if (dbus_message_append_args
@@ -531,11 +549,10 @@ void BlueZ::Adapter::removeDevice(BlueZ::Device const *Device) const
 
 bool BlueZ::Device::exists() const
 {
-  for (auto Device: Bluepairy->Devices) {
-    if (Device.get() == this) return true;
-  }
-
-  return false;
+  return find_if (
+	   begin(Bluepairy->Devices), end(Bluepairy->Devices),
+	   [this](auto Device) { return Device.get() == this; }
+         ) != end(Bluepairy->Devices);
 }
 
 void BlueZ::Device::onPropertiesChanged(DBusMessageIter &Properties /* {sa{sv}}... */)
@@ -618,7 +635,7 @@ void BlueZ::Device::trust(bool Value)
   DBus::PendingCall PendingCall;
 
   PendingCall.send(Bluepairy->SystemBus,
-                   BlueZ::set(path().c_str(), Interface, Property::Trusted, Value));
+                   BlueZ::set(path(), Interface, Property::Trusted, Value));
   dbus_message_unref(PendingCall.get());
 }
 
@@ -627,15 +644,14 @@ DBus::PendingCall BlueZ::Device::pair() const
   DBus::PendingCall Pending;
 
   Pending.send(Bluepairy->SystemBus,
-               BlueZ::newMethodCall(path().c_str(), Interface, "Pair"));
+               BlueZ::newMethodCall(path(), Interface, "Pair"));
 
   return Pending;
 }
 
 void BlueZ::Device::connectProfile(std::string UUID) const
 {
-  auto ConnectProfile = BlueZ::newMethodCall
-    (path().c_str(), Interface, "ConnectProfile");
+  auto ConnectProfile = BlueZ::newMethodCall(path(), Interface, "ConnectProfile");
 
   char const * const Profile = UUID.c_str();
   if (dbus_message_append_args
@@ -651,7 +667,13 @@ void BlueZ::Device::connectProfile(std::string UUID) const
   dbus_message_unref(PendingCall.get());
 }
 
-std::shared_ptr<BlueZ::Adapter> Bluepairy::getAdapter(char const *Path)
+void Bluepairy::send(DBusMessage *&&Message) const
+{
+  dbus_connection_send_preallocated(SystemBus, Send, Message, nullptr);
+  dbus_message_unref(Message);
+}
+  
+Bluepairy::AdapterPtr Bluepairy::getAdapter(char const *Path)
 {
   auto EqualPath = [Path](auto O) { return O->path() == Path; };
   auto Pos = find_if(begin(Adapters), end(Adapters), EqualPath);
@@ -672,13 +694,14 @@ void Bluepairy::removeAdapter(char const *Path)
   }
 }
 
-std::shared_ptr<BlueZ::Device> Bluepairy::getDevice(char const *Path)
+Bluepairy::DevicePtr Bluepairy::getDevice(char const *Path)
 {
   auto EqualPath = [Path](auto O) { return O->path() == Path; };
   auto Pos = find_if(begin(Devices), end(Devices), EqualPath);
   if (Pos != end(Devices)) return *Pos;
       
   Devices.push_back(std::make_shared<BlueZ::Device>(Path, this));
+
   return Devices.back();
 }
 
@@ -756,9 +779,8 @@ void Bluepairy::readWrite()
     case DBUS_MESSAGE_TYPE_ERROR: {
       DBusError Error;
       dbus_error_init(&Error);
-      dbus_uint32_t reply_serial = dbus_message_get_reply_serial(Incoming);
-      // According to tests, reply_serial is wrong, bluez bug?
       if (dbus_set_error_from_message(&Error, Incoming)) {
+        dbus_message_unref(Incoming);
         throwIfErrorIsSet(Error);
       }
       break;
@@ -766,7 +788,7 @@ void Bluepairy::readWrite()
 
     case DBUS_MESSAGE_TYPE_METHOD_RETURN: {
       auto ReplySerial = dbus_message_get_reply_serial(Incoming);
-      std::cout << "Method return " << ReplySerial << std::endl;
+      std::clog << "Method return " << ReplySerial << std::endl;
       break;
     }
 
@@ -829,6 +851,7 @@ void Bluepairy::readWrite()
                 << dbus_message_get_member(Incoming)
                 << std::endl;
       break;
+
     case DBUS_MESSAGE_TYPE_SIGNAL:
       if (dbus_message_is_signal
           (Incoming, DBus::Properties::Interface, "PropertiesChanged")
@@ -896,7 +919,18 @@ void Bluepairy::readWrite()
   }
 }
 
-std::string Bluepairy::guessPIN(std::shared_ptr<BlueZ::Device> Device) const
+bool Bluepairy::hasExpectedProfiles(DevicePtr Device) const
+{
+  std::vector<std::string> Intersection;
+
+  std::set_intersection(begin(Device->profiles()), end(Device->profiles()),
+			begin(ExpectedUUIDs), end(ExpectedUUIDs),
+			std::back_inserter(Intersection));
+
+  return Intersection == ExpectedUUIDs;
+}
+
+std::string Bluepairy::guessPIN(DevicePtr Device) const
 {
   std::smatch Match;
   std::regex HandyTech("(" "Actilino ALO"
@@ -927,20 +961,17 @@ std::string Bluepairy::guessPIN(std::shared_ptr<BlueZ::Device> Device) const
   return "0000";
 }
 
-void Bluepairy::powerUpAllAdapters() {
+void Bluepairy::powerUpAllAdapters()
+{
   for (auto Adapter: Adapters) {
     if (!Adapter->isPowered()) {
-      std::clog << "Powering up adapter " << Adapter->name() << std::endl;
       Adapter->power(true);
       auto StartTime = std::chrono::steady_clock::now();
       do {
         readWrite();
       } while (Adapter->exists() && !Adapter->isPowered() &&
                std::chrono::steady_clock::now() - StartTime < std::chrono::seconds(1));
-      if (Adapter->isPowered()) {
-        std::clog << "Adapter " << Adapter->name()
-                  << " is now powered up." << std::endl;
-      } else {
+      if (!Adapter->isPowered()) {
         std::cerr << "Failed to power up adapter "
                   << Adapter->name() << ", ignored."
                   << std::endl;
@@ -949,23 +980,24 @@ void Bluepairy::powerUpAllAdapters() {
   }
 }
 
-bool Bluepairy::isDiscovering() const {
-  for (auto Adapter: Adapters) {
-    if (Adapter->isPowered() && Adapter->isDiscovering()) {
-      return true;
-    }
-  }
-
-  return false;
+bool Bluepairy::isDiscovering() const
+{
+  return any_of(begin(Adapters), end(Adapters),
+		[](auto Adapter) {
+		  return Adapter->isPowered() && Adapter->isDiscovering();
+		});
 }
 
-bool Bluepairy::startDiscovery() {
+bool Bluepairy::startDiscovery()
+{
   bool Started = false;
 
   for (auto Adapter: poweredAdapters()) {
     if (!Adapter->isDiscovering()) {
       Adapter->startDiscovery();
-      do { readWrite(); } while (Adapter->exists() && !Adapter->isDiscovering());
+      do {
+	readWrite();
+      } while (Adapter->exists() && !Adapter->isDiscovering());
       if (Adapter->exists() && Adapter->isDiscovering()) {
         Started = true;
       }
@@ -975,7 +1007,7 @@ bool Bluepairy::startDiscovery() {
   return Started;
 }
 
-void Bluepairy::forget(std::shared_ptr<BlueZ::Device> Device)
+void Bluepairy::forget(DevicePtr Device)
 {
   Device->adapter()->removeDevice(Device.get());
   while (Device->exists()) {
@@ -983,7 +1015,7 @@ void Bluepairy::forget(std::shared_ptr<BlueZ::Device> Device)
   }
 }
 
-void Bluepairy::pair(std::shared_ptr<BlueZ::Device> Device)
+void Bluepairy::pair(DevicePtr Device)
 {
   auto Future = Device->pair();
 
@@ -996,10 +1028,11 @@ void Bluepairy::pair(std::shared_ptr<BlueZ::Device> Device)
   DBusError Error;
   dbus_error_init(&Error);
   dbus_set_error_from_message(&Error, Reply);
+  dbus_message_unref(Reply);
   throwIfErrorIsSet(Error);
 }
 
-void Bluepairy::trust(std::shared_ptr<BlueZ::Device> Device)
+void Bluepairy::trust(DevicePtr Device)
 {
   if (!Device->isTrusted()) {
     Device->trust(true);

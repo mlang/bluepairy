@@ -23,10 +23,8 @@ namespace DBus {
     ~PendingCall();
 
     void send(DBusConnection *, DBusMessage *&&);
-    void block() const { dbus_pending_call_block(Pending); }
-    bool ready() const {
-      return dbus_pending_call_get_completed(Pending) == TRUE;
-    }
+    void block() const;
+    bool ready() const;
     DBusMessage *get() const;
   };
 }
@@ -154,17 +152,16 @@ class Bluepairy final {
 
   DBusConnection *SystemBus;
   DBusPreallocatedSend *Send;
-  void send(DBusMessage *&&Message) const {
-    dbus_connection_send_preallocated(SystemBus, Send, Message, nullptr);
-    dbus_message_unref(Message);
-  }
+  void send(DBusMessage *&&Message) const;
   
   std::vector<std::shared_ptr<BlueZ::Adapter>> Adapters;
-  decltype(Adapters)::value_type getAdapter(char const *Path);
+  using AdapterPtr = decltype(Adapters)::value_type;
+  AdapterPtr getAdapter(char const *Path);
   void removeAdapter(char const *Path);
     
   std::vector<std::shared_ptr<BlueZ::Device>> Devices;
-  decltype(Devices)::value_type getDevice(char const *Path);
+  using DevicePtr = decltype(Devices)::value_type;
+  DevicePtr getDevice(char const *Path);
   void removeDevice(char const *Path);
 
   void updateObjectProperties(DBusMessageIter *);
@@ -179,30 +176,23 @@ public:
   Bluepairy(Bluepairy &&) = delete;
   Bluepairy &operator= (Bluepairy &&) = delete;
   Bluepairy &operator= (Bluepairy const &) = delete;
-  ~Bluepairy() {
-    dbus_connection_free_preallocated_send(SystemBus, Send);
-    dbus_connection_close(SystemBus);
-    dbus_connection_unref(SystemBus);
-  }
+  ~Bluepairy();
 
   void readWrite();
     
-  bool nameMatches(std::shared_ptr<BlueZ::Device> Device) const {
+  bool nameMatches(DevicePtr Device) const {
     return regex_search(Device->name(), Pattern,
                         std::regex_constants::match_not_null);
   }
-  bool hasExpectedProfiles(std::shared_ptr<BlueZ::Device> Device) const {
-    std::vector<std::string> intersection;
-    std::set_intersection(Device->profiles().begin(), Device->profiles().end(),
-                          ExpectedUUIDs.begin(), ExpectedUUIDs.end(),
-                          std::back_inserter(intersection));
-    return intersection == ExpectedUUIDs;
-  }
+
+  bool hasExpectedProfiles(DevicePtr) const;
+
   decltype(Devices) usableDevices() const {
     decltype(Devices) Result;
+
     for (auto Device: Devices) {
       if (Device->adapter()->isPowered() && Device->isPaired() &&
-          this->nameMatches(Device) && this->hasExpectedProfiles(Device)) {
+          nameMatches(Device) && hasExpectedProfiles(Device)) {
         Result.push_back(Device);
       }
     }
@@ -212,6 +202,7 @@ public:
 
   decltype(Devices) pairableDevices() const {
     decltype(Devices) Result;
+
     for (auto Device: Devices) {
       if (Device->adapter()->exists() && Device->adapter()->isPowered() &&
           !Device->isPaired() && this->nameMatches(Device) &&
@@ -235,15 +226,15 @@ public:
     return Result;
   }
 
-  std::string guessPIN(std::shared_ptr<BlueZ::Device>) const;
+  std::string guessPIN(DevicePtr) const;
 
   void powerUpAllAdapters();
   bool isDiscovering() const;
   bool startDiscovery();
 
-  void forget(decltype(Devices)::value_type);
-  void pair(decltype(Devices)::value_type);
-  void trust(decltype(Devices)::value_type);
+  void forget(DevicePtr);
+  void pair(DevicePtr);
+  void trust(DevicePtr);
 };
 
 #endif // BLUEPAIRY_HPP
