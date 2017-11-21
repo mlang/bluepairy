@@ -5,7 +5,7 @@ After=bluetooth.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/bluepairy --hid 'Active Star AS4'
+ExecStart=/usr/sbin/bluepairy --hid 'Active Star AS4'
 
 [Install]
 WantedBy=bluetooth.target
