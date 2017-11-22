@@ -11,6 +11,6 @@ pkg_check_modules(DBus QUIET REQUIRED dbus-1)
 
 add_executable(bluepairy bluepairy.cxx)
 target_compile_options(bluepairy PRIVATE -fwhole-program)
-target_include_directories(bluepairy PRIVATE ${DBus_INCLUDE_DIRS})
-target_link_libraries(bluepairy ${DBus_LIBRARIES} Boost::program_options)
+target_include_directories(bluepairy PRIVATE ${Boost_INCLUDE_DIRS} ${DBus_INCLUDE_DIRS})
+target_link_libraries(bluepairy ${DBus_LIBRARIES} ${Boost_PROGRAM_OPTIONS_LIBRARY})
 install(TARGETS bluepairy DESTINATION sbin)
