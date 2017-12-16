@@ -787,8 +787,6 @@ void Bluepairy::readWrite()
     }
 
     case DBUS_MESSAGE_TYPE_METHOD_RETURN: {
-      auto ReplySerial = dbus_message_get_reply_serial(Incoming);
-      std::clog << "Method return " << ReplySerial << std::endl;
       break;
     }
 
@@ -852,7 +850,9 @@ void Bluepairy::readWrite()
                 << std::endl;
       break;
 
-    case DBUS_MESSAGE_TYPE_SIGNAL:
+    case DBUS_MESSAGE_TYPE_SIGNAL: {
+      bool handled = false;
+
       if (dbus_message_is_signal
           (Incoming, DBus::Properties::Interface, "PropertiesChanged")
           == TRUE) {
@@ -871,8 +871,10 @@ void Bluepairy::readWrite()
 
             if (strcmp(BlueZ::Adapter::Interface, InterfaceName) == 0) {
               getAdapter(Path)->onPropertiesChanged(Properties);
+              handled = true;
             } else if (strcmp(BlueZ::Device::Interface, InterfaceName) == 0) {
               getDevice(Path)->onPropertiesChanged(Properties);
+              handled = true;
             }
           }
         }
@@ -882,6 +884,7 @@ void Bluepairy::readWrite()
           dbus_message_iter_init(Incoming, &Args);
 
           updateObjectProperties(&Args);
+          handled = true;
         } else if (dbus_message_has_member(Incoming, "InterfacesRemoved") == TRUE) {
           DBusMessageIter Args;
           dbus_message_iter_init(Incoming, &Args);
@@ -906,14 +909,17 @@ void Bluepairy::readWrite()
                 }
                 dbus_message_iter_next(&Interfaces);
               }
+              handled = true;
             }
           }
         }
       }
-      fprintf(stderr, "Signal %s.%s\n",
-              dbus_message_get_interface(Incoming),
-              dbus_message_get_member(Incoming));
+      if (!handled)
+        fprintf(stderr, "Unhandled signal %s.%s\n",
+                dbus_message_get_interface(Incoming),
+                dbus_message_get_member(Incoming));
       break;
+    }
     }
     dbus_message_unref(Incoming);
   }
@@ -1034,11 +1040,14 @@ void Bluepairy::pair(DevicePtr Device)
 
 void Bluepairy::trust(DevicePtr Device)
 {
-  if (!Device->isTrusted()) {
-    Device->trust(true);
-
-    do {
-      readWrite();
-    } while (Device->exists() && !Device->isTrusted());
+  if (Device->isTrusted()) {
+    std::clog << "Device " << Device->name() << " already trusted." << std::endl;
+    return;
   }
+
+  Device->trust(true);
+
+  do {
+    readWrite();
+  } while (Device->exists() && !Device->isTrusted());
 }
